@@ -64,7 +64,7 @@ def main():
                 log(f"第 {i} 轮 完成")
             else:
                 fail += 1
-                log(f"第 {i} 轮 失败 (exit={result.returncode})")
+                log(f"第 {i} 轮失败（退出码：{result.returncode}）")
         except subprocess.TimeoutExpired:
             fail += 1
             log(f"第 {i} 轮 超时")

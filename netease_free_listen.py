@@ -1,24 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-????? - ?????? VIP ?????
-
-????????? eapi ????,?????"???????????"???
-
-??:
-  1. ?????????
-  2. ?????????
-  3. ??????
-  4. ?????? (????)
-  5. ??????
-  6. ???????
-  7. ????
-
-????:
-  python netease_free_listen.py --rounds 5 --watch-time 16
-
-??:
-  pip install requests pycryptodome
+网易云音乐看广告领取免费听权益的自动化脚本。
 """
 
 import argparse
@@ -32,16 +15,6 @@ from Crypto.Util.Padding import pad, unpad
 
 import requests
 
-
-# =============================================================================
-# ??? - ????????,?????????
-# =============================================================================
-
-
-
-# =============================================================================
-# user.json 加载
-# =============================================================================
 
 import os as _os
 
@@ -59,14 +32,10 @@ def _load_user_json() -> dict:
 _USER = _load_user_json()
 
 class Config:
-    # ---- ??: ???? ----
-    # MUSIC_U cookie,???? (???? Cookie ?????)
     MUSIC_U = _USER.get("MUSIC_U", "00E3A81A784CE2D10307A46CB9AB5FE210B53B76BB78BFD4135BC2DAB606BD676AF59BA3FDCAD8648ACC68ED32420B3A19187A4BB78345DE21DB702E9FDCC30B42F81EB36C741A380A62BAD90152C5FFA13906E031EC29C0B403B597091DF747AE51A60CD16FA96A1BFDF411491E0057AE67BFE49A688AF761143B46F2215231E5961E0C2A5BE8B62DA521D25CC4F03B41B2C9352EBFD8A3C61F91BE4C5B75FA6DFA54CE66E20E937F7105CE76FA5F40D8B493733D9BC19139523A2D203E79C079E423FA34538341335F9E83673AD1CDDA932B539CCD123B5DE924A29372A86604B07FB4F9CD4E2740F46E6EE8575EA9EAB79E898F8B0DC757D8CD3B2618297DD93696BBE65DFC4BED8CC8CCE7AB4CF7EAE1B60BB65F8C2C1051AA31F379EA521289622354A68A87E0FBE4B9B0546F765361E32289D3F699A6DDFB4F43FA688545EE9916CB83EC89F4CD56CDF203B5198E9C11C4D006F254CFF5103CE82630A016")
 
-    # ?? ID (32 ?????, ?? x-deviceid ???)
     DEVICE_ID = _USER.get("DEVICE_ID", "76b5116eace97a142fd6549819c8e3c3")
 
-    # ---- ??: ???? ----
     IDFV = _USER.get("IDFV", "4E3FED83-A963-4C4C-8251-459C73719EFC")
     OPENUDID = _USER.get("OPENUDID", "15dff6dc9df4eadc78821d3cba0a3f5517854e45")
     IYUN_ID = _USER.get("IYUN_ID", "c4dbc4875fb1e228b4f1792ceef565d8")
@@ -74,30 +43,22 @@ class Config:
     IYUN_VERSION = _USER.get("IYUN_VERSION", "20260506")
     LAST_IYUN_VERSION = _USER.get("LAST_IYUN_VERSION", "20250325")
 
-    # ---- ??: ???? ----
     LONGITUDE = _USER.get("LONGITUDE", "115.088872")
     LATITUDE = _USER.get("LATITUDE", "33.405355")
 
-    # ---- App ???? ----
     APP_VER = "9.3.41"
     BUILD_VER = "6116"
     OS_VER = "26.1"
 
-    # ---- Cookie ----
     NTES_NUID = _USER.get("NTES_NUID", "6f406b21a028b790f5b09e170ec1df67")
     NMTID = _USER.get("NMTID", "00OZDVbiTDL3TpO6EcvqGB6G98QkzgAAAGfwEFg6A")
 
-    # ---- ????? ----
-    AD_POSITION = "400002"       # ??? ID (???????)
-    WATCH_DELAY = 16             # ?????? (?)
-    CLAIM_DELAY = 3              # ????????? (?)
-    MAX_ROUNDS = 10              # ??????
-    ROUND_DELAY = 10             # ???? (?)
+    AD_POSITION = "400002"
+    WATCH_DELAY = 16
+    CLAIM_DELAY = 3
+    MAX_ROUNDS = 10
+    ROUND_DELAY = 10
 
-
-# =============================================================================
-# eapi ??/????
-# =============================================================================
 
 EAPI_KEY = b"e82ckenh8dichen8"
 EAPI_NONCE = "36cd479b6b5"
@@ -105,22 +66,7 @@ EAPI_SIGN_SALT = "md5forencrypt"
 
 
 def eapi_encrypt(url_path: str, data: dict) -> str:
-    """eapi ??????.
-
-    ??:
-      1. text = JSON ??????
-      2. digest = MD5("nobody" + path + "use" + text + "md5forencrypt")
-      3. payload = path + "-36cd479b6b5-" + text + "-36cd479b6b5-" + digest
-      4. encrypted = AES-128-ECB(payload, key="e82ckenh8dichen8")
-      5. return hex(encrypted).upper()
-
-    Args:
-        url_path: API ??, ? "/api/ad/get"
-        data: ?? JSON ?
-
-    Returns:
-        ???????????
-    """
+    """按 eapi 协议加密请求参数。"""
     text = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
     message = f"nobody{url_path}use{text}{EAPI_SIGN_SALT}"
     digest = hashlib.md5(message.encode("utf-8")).hexdigest()
@@ -133,19 +79,7 @@ def eapi_encrypt(url_path: str, data: dict) -> str:
 
 
 def eapi_decrypt_response(raw_bytes: bytes) -> str:
-    """eapi ????.
-
-    ??:
-      1. AES-128-ECB ?? (key="e82ckenh8dichen8")
-      2. ?? PKCS7 padding
-      3. ??? gzip ?? (magic: 1f8b) ???
-
-    Args:
-        raw_bytes: ?????? (response.content)
-
-    Returns:
-        ???? JSON ???
-    """
+    """解密 eapi 响应内容，并处理可能的 gzip 压缩。"""
     cipher = AES.new(EAPI_KEY, AES.MODE_ECB)
     decrypted = cipher.decrypt(raw_bytes)
     try:
@@ -157,12 +91,8 @@ def eapi_decrypt_response(raw_bytes: bytes) -> str:
     return decrypted.decode("utf-8", errors="replace")
 
 
-# =============================================================================
-# ????? eapi ???
-# =============================================================================
-
 class NetEaseEapi:
-    """????? eapi ???."""
+    """封装网易云音乐 eapi 请求。"""
 
     BASE_URL = "https://interface3.music.163.com"
 
@@ -226,15 +156,7 @@ class NetEaseEapi:
             self.session.cookies.set(k, v, domain=".music.163.com")
 
     def request(self, api_path: str, data: dict) -> dict:
-        """?? eapi ????.
-
-        Args:
-            api_path: API ??, ? "/api/ad/get"
-            data: ???
-
-        Returns:
-            ?????? dict
-        """
+        """发送 eapi 请求并返回解密后的 JSON 数据。"""
         url = f"{self.BASE_URL}/eapi{api_path.replace('/api', '', 1)}"
         c = self.cfg
 
@@ -251,21 +173,20 @@ class NetEaseEapi:
         decrypted = eapi_decrypt_response(resp.content)
         return json.loads(decrypted)
 
-    # ---- ???? ----
 
     def yunbei_login(self) -> dict:
-        """?????????."""
+        """初始化云贝广告会话。"""
         return self.request("/api/ad/listening/new/yunbei/login/request", {})
 
     def get_stage_info(self) -> dict:
-        """?????????."""
+        """查询免费听活动进度。"""
         return self.request("/api/ad/listening/free/tab/homepage/stage/info", {
             "method": "GET",
             "data": {"entranceType": "FREE_LISTEN"},
         })
 
     def get_ad(self) -> dict:
-        """??????."""
+        """请求激励广告。"""
         c = self.cfg
         ad_ext = {
             "ipv4": "",
@@ -350,40 +271,36 @@ class NetEaseEapi:
         return json.dumps(dev_info, separators=(",", ":"))
 
     def report_impress(self, ad_data: dict) -> dict:
-        """??????."""
+        """上报广告曝光。"""
         return self.request("/api/ad/monitor/impress", {
             "dev_info": self._build_dev_info(),
             "ad_data": json.dumps(ad_data, separators=(",", ":")),
         })
 
     def report_click(self, ad_data: dict) -> dict:
-        """??????."""
+        """上报广告点击。"""
         return self.request("/api/ad/monitor/click", {
             "dev_info": self._build_dev_info(),
             "ad_data": json.dumps(ad_data, separators=(",", ":")),
         })
 
     def claim_rights(self, req_param: dict, check_token: str = "") -> dict:
-        """???????."""
+        """领取免费听权益。"""
         return self.request("/api/ad/listening/rights/gain", {
             "checkToken": check_token,
             "reqParam": json.dumps(req_param, separators=(",", ":")),
         })
 
     def get_free_listen_data(self) -> dict:
-        """?????????."""
+        """获取免费听权益数据。"""
         return self.request("/api/vipnewcenter/app/free/listen/data/v2", {
             "limit": 12,
             "refresh": False,
         })
 
 
-# =============================================================================
-# ??????
-# =============================================================================
-
 def _parse_json(val, default=None):
-    """???? JSON ???."""
+    """安全解析 JSON 数据。"""
     if not val:
         return default or {}
     if isinstance(val, (dict, list)):
@@ -395,7 +312,7 @@ def _parse_json(val, default=None):
 
 
 def _get_context_info(ad_info: dict) -> dict:
-    """???????? contextInfo (??? extJson ?)."""
+    """提取广告响应中的 contextInfo。"""
     ci = _parse_json(ad_info.get("contextInfo"))
     if ci:
         return ci
@@ -404,7 +321,7 @@ def _get_context_info(ad_info: dict) -> dict:
 
 
 def _get_context_info_str(ad_info: dict) -> str:
-    """?? contextInfo ? JSON ?????."""
+    """提取字符串形式的 contextInfo。"""
     ci_str = ad_info.get("contextInfo", "")
     if ci_str:
         return ci_str
@@ -416,7 +333,7 @@ def _get_context_info_str(ad_info: dict) -> str:
 
 
 def build_ad_data_for_monitor(ad_info: dict, ad_req_id: str, cfg: Config) -> dict:
-    """?? monitor/impress ? monitor/click ? ad_data."""
+    """构造广告曝光和点击上报参数。"""
     ci = _get_context_info(ad_info)
     gri = _parse_json(ad_info.get("generalRightsInfo"))
     ej = _parse_json(ad_info.get("extJson"))
@@ -503,7 +420,7 @@ def build_ad_data_for_monitor(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
 
 
 def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dict:
-    """?? rights/gain ? reqParam."""
+    """构造权益领取请求参数。"""
     ci = _get_context_info(ad_info)
     gri = _parse_json(ad_info.get("generalRightsInfo"))
     lri = ad_info.get("listeningRightsInfo") or {}
@@ -549,69 +466,56 @@ def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
     }
 
 
-# =============================================================================
-# ???????
-# =============================================================================
-
 def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
-    """???????????????.
-
-    Returns:
-        True = ??????
-    """
+    """执行一轮广告领取流程，并返回是否领取成功。"""
     print(f"\n{'=' * 60}")
-    print(f"  ? {round_num} ?")
+    print(f"  第 {round_num} 轮")
     print(f"{'=' * 60}")
 
-    # 1. ????
-    print("[1/4] ????...")
+    print("[1/4] 请求广告…")
     ad_resp = client.get_ad()
 
     if ad_resp.get("code") != 200:
-        print(f"  ??: {ad_resp.get('message', '????')}")
+        print(f"  请求广告失败：{ad_resp.get('message', '未知错误')}")
         return False
 
     ads = ad_resp.get("ads", {})
     ad_key = f"{cfg.AD_POSITION}_0"
 
     if ad_key not in ads:
-        print(f"  ???: {ad_resp.get('message', '?')}")
+        print(f"  没有可用广告：{ad_resp.get('message', '无')}")
         return False
 
     ad_info = ads[ad_key]
     ci = _get_context_info(ad_info)
     gri = _parse_json(ad_info.get("generalRightsInfo"))
 
-    print(f"  ??: {ad_info.get('text', 'N/A')[:60]}")
+    print(f"  广告：{ad_info.get('text', '无标题')[:60]}")
     print(f"  ad_id: {ad_info.get('ad_id')}, req_id: {ci.get('req_id', 'N/A')}")
-    print(f"  ??: {gri.get('rightsGainMethod', '?')}, "
-          f"??: {gri.get('clickStayTime', '?')}s, "
-          f"??: {gri.get('validVideoInterval', '?')}s")
+    print(f"  领取方式：{gri.get('rightsGainMethod', '未知')}，"
+          f"停留：{gri.get('clickStayTime', '未知')} 秒，"
+          f"有效间隔：{gri.get('validVideoInterval', '未知')} 秒")
 
     ad_req_id = ad_info.get("requestId", "")
     if not ad_req_id:
         ad_req_id = f"1773290531_{int(time.time() * 1000)}_3963"
 
-    # 2. ????
-    print("[2/4] ????...")
+    print("[2/4] 上报广告曝光…")
     ad_data = build_ad_data_for_monitor(ad_info, ad_req_id, cfg)
     impress_resp = client.report_impress(ad_data)
-    print(f"  ??: code={impress_resp.get('code')}")
+    print(f"  曝光上报结果：code={impress_resp.get('code')}")
 
-    # ????
-    print(f"  ???? {cfg.WATCH_DELAY}s...")
+    print(f"  模拟观看 {cfg.WATCH_DELAY} 秒…")
     time.sleep(cfg.WATCH_DELAY)
 
-    # 3. ????
-    print("[3/4] ????...")
+    print("[3/4] 上报广告点击…")
     ad_data["clickTime"] = int(time.time() * 1000)
     click_resp = client.report_click(ad_data)
-    print(f"  ??: code={click_resp.get('code')}")
+    print(f"  点击上报结果：code={click_resp.get('code')}")
 
     time.sleep(cfg.CLAIM_DELAY)
 
-    # 4. ????
-    print("[4/4] ????...")
+    print("[4/4] 领取免费听权益…")
     req_param = build_rights_claim_params(ad_info, ad_req_id, cfg)
     gain_resp = client.claim_rights(req_param, check_token="")
 
@@ -624,32 +528,32 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
     rights_duration = data.get("gainRightsDuration") if isinstance(data, dict) else None
     rights_unit = data.get("rightsDurationUnit") if isinstance(data, dict) else None
 
-    print(f"  ??: code={code}, gain={gain_flag}")
+    print(f"  领取结果：code={code}，成功={gain_flag}")
     if msg:
-        print(f"  ??: {msg}")
+        print(f"  消息：{msg}")
     if show_content:
-        print(f"  ??: {show_content}")
+        print(f"  内容：{show_content}")
     if rights_duration:
-        print(f"  ??: {rights_duration} {rights_unit or ''}")
+        print(f"  获得时长：{rights_duration} {rights_unit or ''}")
 
     return gain_flag
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="????? - ?????? VIP ???"
+        description="网易云音乐看广告免费听自动化工具"
     )
     parser.add_argument(
         "--rounds", type=int, default=Config.MAX_ROUNDS,
-        help="???? (?? 10)"
+        help="广告执行轮数（默认：10）"
     )
     parser.add_argument(
         "--delay", type=int, default=Config.ROUND_DELAY,
-        help="?????? (?? 10)"
+        help="轮次之间的间隔秒数（默认：10）"
     )
     parser.add_argument(
         "--watch-time", type=int, default=Config.WATCH_DELAY,
-        help="???????? (?? 16)"
+        help="模拟观看广告的秒数（默认：16）"
     )
     args = parser.parse_args()
 
@@ -659,28 +563,25 @@ def main():
     client = NetEaseEapi(cfg)
 
     print("=" * 60)
-    print("  ????? - ?????? VIP ???")
+    print("  网易云音乐看广告免费听自动化工具")
     print("=" * 60)
 
-    # ???
-    print("\n[???] ????...")
+    print("\n[初始化] 云贝登录…")
     try:
         login_resp = client.yunbei_login()
         print(f"  code={login_resp.get('code')}")
     except Exception as e:
-        print(f"  ??: {e}")
+        print(f"  登录异常：{e}")
 
-    # ??????
-    print("\n[???] ????...")
+    print("\n[初始化] 查询免费听进度…")
     try:
         stage = client.get_stage_info()
         sd = stage.get("data", {})
-        print(f"  ????: {sd.get('currentAmount', '?')}/{sd.get('maximumAmount', '?')}")
-        print(f"  ????: {sd.get('currentIndex', '?')}/{sd.get('totalStage', '?')}")
+        print(f"  当前进度：{sd.get('currentAmount', '未知')}/{sd.get('maximumAmount', '未知')}")
+        print(f"  当前阶段：{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
     except Exception as e:
-        print(f"  ??: {e}")
+        print(f"  查询进度异常：{e}")
 
-    # ????
     success_count = 0
     fail_count = 0
 
@@ -691,30 +592,29 @@ def main():
             else:
                 fail_count += 1
         except Exception as e:
-            print(f"  ??: {e}")
+            print(f"  本轮执行异常：{e}")
             fail_count += 1
 
         if i < args.rounds:
-            print(f"\n  ?? {args.delay}s...")
+            print(f"\n  等待 {args.delay} 秒后开始下一轮…")
             time.sleep(args.delay)
 
-    # ??
     print("\n" + "=" * 60)
-    print("  ????")
+    print("  执行汇总")
     print("=" * 60)
-    print(f"  ???: {args.rounds}")
-    print(f"  ??: {success_count}")
-    print(f"  ??: {fail_count}")
+    print(f"  总轮数：{args.rounds}")
+    print(f"  成功：{success_count}")
+    print(f"  失败：{fail_count}")
 
     try:
         stage = client.get_stage_info()
         sd = stage.get("data", {})
-        print(f"\n  ????: {sd.get('currentAmount', '?')}/{sd.get('maximumAmount', '?')}")
-        print(f"  ????: {sd.get('currentIndex', '?')}/{sd.get('totalStage', '?')}")
+        print(f"\n  最终进度：{sd.get('currentAmount', '未知')}/{sd.get('maximumAmount', '未知')}")
+        print(f"  最终阶段：{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
     except Exception:
         pass
 
-    print("\n??!")
+    print("\n执行完成！")
 
 
 if __name__ == "__main__":
