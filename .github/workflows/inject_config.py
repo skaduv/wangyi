@@ -1,48 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GitHub Actions - 注入用户配置 (MUSIC_U / DEVICE_ID)"""
+"""GitHub Actions - 检查 user.json 配置"""
 
+import json
 import os
-import re
 import sys
 
-SCRIPT = os.path.join(
+USER_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "netease_free_listen.py"
+    "..", "..", "user.json"
 )
 
 
 def main():
-    music_u = os.environ.get("MUSIC_U", "")
-    device_id = os.environ.get("DEVICE_ID", "")
+    if not os.path.exists(USER_JSON):
+        print(f"❌ user.json 不存在: {USER_JSON}")
+        sys.exit(1)
+
+    with open(USER_JSON, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    music_u = cfg.get("MUSIC_U", "")
+    device_id = cfg.get("DEVICE_ID", "")
 
     if not music_u:
-        print("❌ 错误: 未设置 MUSIC_U secret")
+        print(f"❌ user.json 中 MUSIC_U 为空")
         sys.exit(1)
     if not device_id:
-        print("❌ 错误: 未设置 DEVICE_ID secret")
+        print(f"❌ user.json 中 DEVICE_ID 为空")
         sys.exit(1)
 
-    with open(SCRIPT, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    content = re.sub(
-        r'(MUSIC_U\s*=\s*")[^"]*(")',
-        r"\g<1>" + music_u + r"\g<2>",
-        content,
-        count=1,
-    )
-    content = re.sub(
-        r'(DEVICE_ID\s*=\s*")[^"]*(")',
-        r"\g<1>" + device_id + r"\g<2>",
-        content,
-        count=1,
-    )
-
-    with open(SCRIPT, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    print(f"✅ 配置注入成功 (MUSIC_U: {music_u[:8]}..., DEVICE_ID: {device_id[:8]}...)")
+    print(f"✅ 从 user.json 加载成功")
+    print(f"  MUSIC_U: {music_u[:12]}...{music_u[-4:]}")
+    print(f"  DEVICE_ID: {device_id}")
 
 
 if __name__ == "__main__":

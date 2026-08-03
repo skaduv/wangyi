@@ -34,10 +34,7 @@ jobs:
       - name: 安装依赖
         run: pip install requests pycryptodome
 
-      - name: 写入用户配置
-        env:
-          MUSIC_U: ${{ secrets.MUSIC_U }}
-          DEVICE_ID: ${{ secrets.DEVICE_ID }}
+      - name: 检查 user.json 配置
         run: python3 .github/workflows/inject_config.py
 
       - name: 运行看广告脚本

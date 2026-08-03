@@ -68,24 +68,30 @@ result = JSON.parse(decrypted)
 pip install requests pycryptodome
 ```
 
-## 使用方法
+## 配置
 
-### 1. 配置
+编辑项目根目录下的 `user.json` 文件,填入你的用户信息:
 
-编辑 `netease_free_listen.py` 中的 `Config` 类,填入你的参数:
-
-```python
-class Config:
-    # 必填 - 从浏览器 Cookie 或抓包获取
-    MUSIC_U = "你的MUSIC_U值"
-    DEVICE_ID = "你的设备ID"
-
-    # 可选 - 有默认值
-    WATCH_DELAY = 16   # 模拟观看秒数
-    MAX_ROUNDS = 10    # 执行轮数
+```json
+{
+  "MUSIC_U": "你的MUSIC_U值",
+  "DEVICE_ID": "你的设备ID",
+  "IDFV": "你的IDFV",
+  "OPENUDID": "你的openudid",
+  "IYUN_ID": "你的iyunId",
+  "LAST_IYUN_ID": "你的lastIyunId",
+  "IYUN_VERSION": "20260506",
+  "LAST_IYUN_VERSION": "20250325",
+  "LONGITUDE": "115.088872",
+  "LATITUDE": "33.405355",
+  "NTES_NUID": "你的ntes_nuid",
+  "NMTID": "你的NMTID"
+}
 ```
 
-### 2. 获取 MUSIC_U 和 DEVICE_ID
+**必填字段**: `MUSIC_U`、`DEVICE_ID`。其余字段有默认值,不填也能运行。
+
+### 获取 MUSIC_U 和 DEVICE_ID
 
 **方法一: 浏览器抓包**
 
@@ -98,7 +104,7 @@ class Config:
 2. 从任意 `eapi` 请求的 Cookie 中获取 `MUSIC_U`
 3. 从请求头 `x-deviceid` 获取 `DEVICE_ID`
 
-### 3. 运行
+## 运行
 
 ```bash
 # 默认运行 10 轮
@@ -108,7 +114,7 @@ python netease_free_listen.py
 python netease_free_listen.py --rounds 5 --watch-time 16 --delay 10
 ```
 
-### 4. 运行示例
+### 运行示例
 
 ```
 ============================================================
@@ -189,16 +195,13 @@ cron 触发 (UTC 00:00/01:00/02:00 = 北京 08:00/09:00/10:00)
 
 1. **Fork 本仓库**到你的 GitHub 账号
 
-2. **设置 Secrets** — 进入仓库 `Settings` → `Secrets and variables` → `Actions`,添加:
-
-   | Secret 名称 | 说明 |
-   |------------|------|
-   | `MUSIC_U` | 网易云音乐 MUSIC_U Cookie 值 |
-   | `DEVICE_ID` | 设备 ID (32位 hex) |
+2. **编辑 `user.json`** — 在仓库根目录的 `user.json` 中填入你的 `MUSIC_U` 和 `DEVICE_ID`
 
 3. **启用 Actions** — 进入 `Actions` 页面,点击 `Enable workflow`
 
 4. **手动测试** — 在 `Actions` 页面选择「网易云音乐 - 看广告免费听」,点击 `Run workflow` 手动触发
+
+> **注意**: `user.json` 包含登录凭证,**不要提交到公开仓库**。建议将仓库设为私有,或将 `user.json` 加入 `.gitignore` 后通过其他方式同步。
 
 ### 注意事项
 
@@ -214,9 +217,10 @@ netease-free-listen/
 ├── .github/
 │   └── workflows/
 │       ├── free_listen.yml      # GitHub Actions 定时任务
-│       ├── inject_config.py     # Secrets 注入脚本
+│       ├── inject_config.py     # user.json 配置检查脚本
 │       └── run_ads.py           # 随机间隔执行脚本
 ├── netease_free_listen.py       # 主程序 (单文件,包含所有模块)
+├── user.json                    # 用户配置 (MUSIC_U / DEVICE_ID 等)
 └── README.md                    # 本文档
 ```
 
@@ -227,6 +231,7 @@ netease-free-listen/
 - **使用限制**: 每日看广告领取权益有上限,超出后接口会返回错误
 - **参数时效性**: `MUSIC_U` 有过期时间,过期后需重新获取
 - **广告可用性**: 广告库存由广告平台决定,某些时段可能无广告可投
+- **凭证安全**: `user.json` 包含敏感登录凭证,请勿泄露或提交到公开仓库
 
 ## 免责声明
 
