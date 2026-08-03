@@ -1,0 +1,48 @@
+name: 网易云音乐 - 看广告免费听
+
+on:
+  schedule:
+    # UTC 00:00 / 01:00 / 02:00 = 北京时间 08:00 / 09:00 / 10:00
+    # 配合脚本内随机延迟,覆盖 08:00-11:00 随机启动
+    - cron: '0 0 * * *'
+    - cron: '0 1 * * *'
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: '看广告轮数'
+        required: false
+        default: '10'
+        type: string
+
+jobs:
+  watch-ads:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: free-listen-daily
+      cancel-in-progress: false
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install requests pycryptodome
+
+      - name: 写入用户配置
+        env:
+          MUSIC_U: ${{ secrets.MUSIC_U }}
+          DEVICE_ID: ${{ secrets.DEVICE_ID }}
+        run: python3 .github/workflows/inject_config.py
+
+      - name: 运行看广告脚本
+        env:
+          TZ: 'Asia/Shanghai'
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          INPUT_ROUNDS: ${{ github.event.inputs.rounds }}
+        run: python3 .github/workflows/run_ads.py
