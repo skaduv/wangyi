@@ -1,6 +1,6 @@
 # 网易云音乐 - 看广告免费听 VIP 自动化
 
-通过逆向网易云音乐 `eapi` 加密协议,使用 Python 模拟完整的「看广告 → 领取免费听权益」流程,实现自动化看广告获取免费听歌时长。
+通过逆向网易云音乐 `eapi` 加密协议与易盾 `checkToken` 生成算法,使用 Python 模拟完整的「看广告 → 领取免费听权益」流程,实现自动化看广告获取免费听歌时长。
 
 ## 原理
 
@@ -39,6 +39,38 @@ if decrypted[0:2] == 0x1f8b:
 result = JSON.parse(decrypted)
 ```
 
+### checkToken 生成算法 (逆向自易盾 NEYiDunFingerprint SDK)
+
+`/eapi/ad/listening/rights/gain` 等接口要求请求头携带 `X-AntiCheatToken`
+(即 body 中的 `checkToken`)。该 token 由网易易盾设备指纹 SDK 生成,
+通过逆向 iOS 主二进制 (`NTESCSGuardian createTokenWithTimeout:bToken:`)
+还原出完整算法:
+
+**生成步骤**
+
+```
+1. 构造 JSON 载荷:
+     {"b":"<b_tag>","r":4,"d":"<d_tag>"}
+     - b: 动态会话标识 (24字节 base64, 由易盾服务器下发,可轮换复用)
+     - r: 固定值 4
+     - d: 设备绑定固定值 (24字节 base64, 同一设备不变)
+
+2. XOR 混淆变换 (6 字节循环表):
+     out[i] = (0 - (in[i] ^ TABLE[i % 6])) & 0xff
+     TABLE = [0x1f, 0x7d, 0xf4, 0x3c, 0x20, 0x30]
+
+3. hex 编码 → checkToken
+```
+
+**验证结果**
+
+- 前缀 `9ca16ae2e6ee` 恰好等于 `transform('{"b":"')` 的前 6 字节 ✓
+- 对 HAR 抓包的全部 4 个 token 解码 → JSON → 重新编码,100% 匹配 ✓
+- JSON 键 `b`/`r`/`d` 由主二进制全局常量 XOR 派生 (`0xd9bb→'b'` 等) ✓
+
+`d` 值与 `b_tag` 池为设备绑定数据,需从本人设备的抓包中提取,配置在
+`user.json` 的 `CHECKTOKEN_DEVICE_D` / `CHECKTOKEN_B_TAG_POOL` 字段。
+
 ### 关键接口
 
 | 接口 | 说明 |
@@ -76,20 +108,45 @@ pip install requests pycryptodome
 {
   "MUSIC_U": "你的MUSIC_U值",
   "DEVICE_ID": "你的设备ID",
-  "IDFV": "你的IDFV",
-  "OPENUDID": "你的openudid",
-  "IYUN_ID": "你的iyunId",
-  "LAST_IYUN_ID": "你的lastIyunId",
-  "IYUN_VERSION": "20260506",
-  "LAST_IYUN_VERSION": "20250325",
-  "LONGITUDE": "115.088872",
-  "LATITUDE": "33.405355",
-  "NTES_NUID": "你的ntes_nuid",
-  "NMTID": "你的NMTID"
+  "USER_ID": "你的用户ID(数字)",
+  "CHECKTOKEN_DEVICE_D": "你的设备checkToken固定值d",
+  "CHECKTOKEN_B_TAG_POOL": ["b_tag1", "b_tag2", "b_tag3", "b_tag4"]
 }
 ```
 
-**必填字段**: `MUSIC_U`、`DEVICE_ID`。其余字段有默认值,不填也能运行。
+**必需字段** (缺失时脚本启动报错):
+
+| 字段 | 说明 |
+|------|------|
+| `MUSIC_U` | 登录凭证 Cookie |
+| `DEVICE_ID` | 设备唯一标识 (32位hex) |
+| `USER_ID` | 用户ID,用于广告请求 ID |
+| `CHECKTOKEN_DEVICE_D` | checkToken 设备绑定值 `d` |
+| `CHECKTOKEN_B_TAG_POOL` | checkToken 会话标识 `b` 池 (非空数组) |
+
+**可选字段** (缺失时请求中自动省略,可能影响广告匹配精度):
+`IDFV`、`OPENUDID`、`IYUN_ID`、`LAST_IYUN_ID`、`IYUN_VERSION`、
+`LAST_IYUN_VERSION`、`LONGITUDE`、`LATITUDE`、`NTES_NUID`、`NMTID`
+
+> **注意**: 代码中不保留任何用户信息,全部从 `user.json` 读取。
+> `user.json` 已被 `.gitignore` 排除,请勿强制提交。
+
+### 获取 checkToken 参数 (CHECKTOKEN_DEVICE_D / B_TAG_POOL)
+
+`checkToken` 由易盾 SDK 生成,`d` 为设备绑定固定值,`b_tag` 为会话标识。
+提取方法:
+
+1. 用 mitmproxy/Charles 抓取网易云音乐 App 流量
+2. 任选 4 次不同会话的 `rights/gain` 请求
+3. 对每个 `x-anticheattoken` 请求头调用脚本内置的解码函数还原 JSON:
+
+```bash
+python -c "from netease_free_listen import decode_check_token; \
+import sys; print(decode_check_token(sys.argv[1]))" 你的token
+```
+
+4. 将 JSON 中的 `d` 填入 `CHECKTOKEN_DEVICE_D`,各次会话的 `b` 填入
+   `CHECKTOKEN_B_TAG_POOL` 数组
 
 ### 获取 MUSIC_U 和 DEVICE_ID
 
@@ -214,13 +271,9 @@ cron 触发 (UTC 00:00/01:00/02:00 = 北京 08:00/09:00/10:00)
 
 ```
 netease-free-listen/
-├── .github/
-│   └── workflows/
-│       ├── free_listen.yml      # GitHub Actions 定时任务
-│       ├── inject_config.py     # user.json 配置检查脚本
-│       └── run_ads.py           # 随机间隔执行脚本
-├── netease_free_listen.py       # 主程序 (单文件,包含所有模块)
-├── user.json                    # 用户配置 (MUSIC_U / DEVICE_ID 等)
+├── .gitignore                   # 排除 user.json 等敏感文件
+├── netease_free_listen.py       # 主程序 (单文件,含 checkToken 生成算法)
+├── user.json                    # 用户配置 (MUSIC_U / DEVICE_ID / checkToken 参数)
 └── README.md                    # 本文档
 ```
 

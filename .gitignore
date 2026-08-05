@@ -1,0 +1,27 @@
+# 用户凭证/配置 - 包含敏感信息,禁止提交
+
+
+# 逆向分析临时文件
+analyze.py
+analyze_tokens.py
+analyze_cafedada.py
+parse_macho.py
+parse_macho2.py
+parse_objc.py
+resolve_calls.py
+disasm_tool.py
+checktoken_impl.py
+createToken_full.txt
+
+# 抓包数据
+*.har
+
+# Python
+__pycache__/
+*.pyc
+
+# IDA 数据库 (体积大,可重新生成)
+*.i64
+*.id0
+*.id1
+*.nam

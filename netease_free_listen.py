@@ -1,80 +1,172 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-网易云音乐看广告领取免费听权益的自动化脚本。
+网易云音乐看广告领取免费听权益的自动化脚本
 """
 
 import argparse
-import base64
 import gzip
 import hashlib
 import json
-import secrets
+import os
 import time
-import hmac
+
+import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-import requests as _requests
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-
-import os as _os
 
 def _load_user_json() -> dict:
-    """从 user.json 加载用户配置"""
-    json_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "user.json")
-    if not _os.path.exists(json_path):
+    """从 user.json 加载用户配置,文件缺失或损坏时返回空字典。"""
+    json_path = os.path.join(_BASE_DIR, "user.json")
+    if not os.path.exists(json_path):
         return {}
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (json.JSONDecodeError, OSError):
         return {}
+
 
 _USER = _load_user_json()
 
+
 class Config:
-    MUSIC_U = _USER.get("MUSIC_U", "00E3A81A784CE2D10307A46CB9AB5FE210B53B76BB78BFD4135BC2DAB606BD676AF59BA3FDCAD8648ACC68ED32420B3A19187A4BB78345DE21DB702E9FDCC30B42F81EB36C741A380A62BAD90152C5FFA13906E031EC29C0B403B597091DF747AE51A60CD16FA96A1BFDF411491E0057AE67BFE49A688AF761143B46F2215231E5961E0C2A5BE8B62DA521D25CC4F03B41B2C9352EBFD8A3C61F91BE4C5B75FA6DFA54CE66E20E937F7105CE76FA5F40D8B493733D9BC19139523A2D203E79C079E423FA34538341335F9E83673AD1CDDA932B539CCD123B5DE924A29372A86604B07FB4F9CD4E2740F46E6EE8575EA9EAB79E898F8B0DC757D8CD3B2618297DD93696BBE65DFC4BED8CC8CCE7AB4CF7EAE1B60BB65F8C2C1051AA31F379EA521289622354A68A87E0FBE4B9B0546F765361E32289D3F699A6DDFB4F43FA688545EE9916CB83EC89F4CD56CDF203B5198E9C11C4D006F254CFF5103CE82630A016")
+    """运行配置。用户相关字段全部来自 user.json,无硬编码默认值。
 
-    DEVICE_ID = _USER.get("DEVICE_ID", "76b5116eace97a142fd6549819c8e3c3")
+    必需字段 (缺失时 validate() 报错):
+        MUSIC_U, DEVICE_ID, USER_ID, CHECKTOKEN_DEVICE_D, CHECKTOKEN_B_TAG_POOL
+    可选字段 (缺失时请求中省略,可能影响广告匹配精度):
+        IDFV, OPENUDID, IYUN_ID, LAST_IYUN_ID, IYUN_VERSION, LAST_IYUN_VERSION,
+        LONGITUDE, LATITUDE, NTES_NUID, NMTID
+    """
 
-    IDFV = _USER.get("IDFV", "4E3FED83-A963-4C4C-8251-459C73719EFC")
-    OPENUDID = _USER.get("OPENUDID", "15dff6dc9df4eadc78821d3cba0a3f5517854e45")
-    IYUN_ID = _USER.get("IYUN_ID", "c4dbc4875fb1e228b4f1792ceef565d8")
-    LAST_IYUN_ID = _USER.get("LAST_IYUN_ID", "04538f499c2986eb2271763e4ecbd554")
-    IYUN_VERSION = _USER.get("IYUN_VERSION", "20260506")
-    LAST_IYUN_VERSION = _USER.get("LAST_IYUN_VERSION", "20250325")
+    # ---- 必需: 登录凭证/设备标识 ----
+    MUSIC_U = _USER.get("MUSIC_U", "")
+    DEVICE_ID = _USER.get("DEVICE_ID", "")
+    USER_ID = _USER.get("USER_ID", "")
 
-    LONGITUDE = _USER.get("LONGITUDE", "115.088872")
-    LATITUDE = _USER.get("LATITUDE", "33.405355")
+    # ---- 必需: checkToken 参数 (易盾设备指纹,同一设备固定) ----
+    CHECKTOKEN_DEVICE_D = _USER.get("CHECKTOKEN_DEVICE_D", "")
+    CHECKTOKEN_B_TAG_POOL = _USER.get("CHECKTOKEN_B_TAG_POOL", [])
 
+    # ---- 可选: 设备指纹扩展 (缺失时请求中省略) ----
+    IDFV = _USER.get("IDFV", "")
+    OPENUDID = _USER.get("OPENUDID", "")
+    IYUN_ID = _USER.get("IYUN_ID", "")
+    LAST_IYUN_ID = _USER.get("LAST_IYUN_ID", "")
+    IYUN_VERSION = _USER.get("IYUN_VERSION", "")
+    LAST_IYUN_VERSION = _USER.get("LAST_IYUN_VERSION", "")
+    LONGITUDE = _USER.get("LONGITUDE", "")
+    LATITUDE = _USER.get("LATITUDE", "")
+    NTES_NUID = _USER.get("NTES_NUID", "")
+    NMTID = _USER.get("NMTID", "")
+
+    # ---- App 环境信息 (非用户数据,可随版本更新) ----
     APP_VER = "9.3.41"
     BUILD_VER = "6116"
     OS_VER = "26.1"
 
-    NTES_NUID = _USER.get("NTES_NUID", "6f406b21a028b790f5b09e170ec1df67")
-    NMTID = _USER.get("NMTID", "00OZDVbiTDL3TpO6EcvqGB6G98QkzgAAAGfwEFg6A")
-
+    # ---- 运行参数 ----
     AD_POSITION = "400002"
     WATCH_DELAY = 16
     CLAIM_DELAY = 3
     MAX_ROUNDS = 10
     ROUND_DELAY = 10
 
+    @classmethod
+    def validate(cls):
+        """校验必填配置,缺失时抛出 SystemExit。"""
+        required = ("MUSIC_U", "DEVICE_ID", "USER_ID",
+                    "CHECKTOKEN_DEVICE_D", "CHECKTOKEN_B_TAG_POOL")
+        missing = [k for k in required
+                   if not getattr(cls, k, None)
+                   or (k == "CHECKTOKEN_B_TAG_POOL" and not cls.CHECKTOKEN_B_TAG_POOL)]
+        if missing:
+            raise SystemExit(
+                f"[错误] user.json 缺少必填字段: {', '.join(missing)}\n"
+                "请参考 README.md 配置后重试。"
+            )
+
+    @staticmethod
+    def _nonempty(**kwargs) -> dict:
+        """过滤空值字段,用于构造请求时省略未配置的可选参数。"""
+        return {k: v for k, v in kwargs.items() if v not in ("", [], {}, None)}
+
 
 EAPI_KEY = b"e82ckenh8dichen8"
 EAPI_NONCE = "36cd479b6b5"
 EAPI_SIGN_SALT = "md5forencrypt"
 
-# 从真实App抓包中提取的 checkToken 池(设备绑定,长期有效)
-# 每个 checkToken 包含不同的 b_tag,服务端用于验证设备指纹
-# 由于 b_tag 与时间戳的哈希算法是易盾SDK内部实现(无法逆向),
-# 直接复用这些已验证的 checkToken
-CHECKTOKEN_POOL = [
-    "9ca16ae2e6ee8ec84fbcb387d9c86efb9a8ea3c44e829f9eadd77ab28d8baec5798eb6a8b4eb2af0febec3b940f0feacc3b92a888ffdd4d86096ebfea7eb4e928e9aa2c44a9489beccd858ed9b8cabc64088eeadc300",
-    "9ca16ae2e6ee98d55ca0f1fc84ce6af190fba6d1c1efa9a8db7ba0f19ca7e74af1e9aca2e579e2f4ee93a132f8f4ee85a132e29c9fd4b25f988afbd3c564868e9eb7c44b82909993aa5fa0f18ba5c94df89cfe84a177",
-    "9ca16ae2e6eeb6eb6785ed8383e76295968fb6d1c1efa9a8db7ba0f19ca7e74af1e9aca2e579e2f4ee93a132f8f4ee85a132e29c9fd4b25f988afbd3c564868e9eb7c44b82909993aa5fa0f18ba5c94df89cfe84a177",
-]
+# ============================================================
+# checkToken 生成算法 (逆向自易盾 NEYiDunFingerprint SDK)
+#
+# 逆向分析 neteasemusic iOS 9.5.65 主二进制得出完整算法:
+#   1. 构造 JSON 载荷: {"b":"<b_tag>","r":4,"d":"<d_tag>"}
+#      - b: 动态会话标识 (24字节 base64, 易盾服务器下发)
+#      - r: 固定值 4
+#      - d: 设备绑定固定值 (24字节 base64, 同一设备不变)
+#   2. XOR 混淆变换: out[i] = (0 - (in[i] ^ TABLE[i % 6])) & 0xff
+#      TABLE = [0x1f, 0x7d, 0xf4, 0x3c, 0x20, 0x30]
+#   3. hex 编码输出即为 checkToken
+#
+# 验证: 前缀 9ca16ae2e6ee == transform('{"b":"'), 对 HAR 抓包全部
+# 4 个 token 解码->JSON->重新编码 100% 匹配。
+#
+# 逆向来源:
+#   - NTESCSGuardian createTokenWithTimeout:bToken: (0x100b51ac4)
+#   - XOR 表: __TEXT,__const @ 0x10a745baf
+#   - JSON 键 b/r/d 由全局常量 XOR 派生
+#   - 主密钥: 0x10ebcb4f2 XOR 0x14 = '5DEW8opxIX4hR6CVxjh3iJkZ6czm4fi9'
+# ============================================================
+
+CHECKTOKEN_XOR_TABLE = [0x1f, 0x7d, 0xf4, 0x3c, 0x20, 0x30]
+
+
+def _checktoken_xor(payload: bytes) -> bytes:
+    """易盾 XOR 混淆变换: out[i] = (0 - (in[i] ^ TABLE[i % 6])) & 0xff"""
+    t = CHECKTOKEN_XOR_TABLE
+    return bytes(((0 - (p ^ t[i % 6])) & 0xff) for i, p in enumerate(payload))
+
+
+def _checktoken_unxor(data: bytes) -> bytes:
+    """逆变换: in[i] = ((0 - out[i]) & 0xff) ^ TABLE[i % 6]"""
+    t = CHECKTOKEN_XOR_TABLE
+    return bytes(((0 - d) & 0xff) ^ t[i % 6] for i, d in enumerate(data))
+
+
+def encode_check_token(b_tag: str, d_tag: str, r: int = 4) -> str:
+    """按逆向算法生成 checkToken (JSON + XOR 混淆 + hex)。"""
+    payload = json.dumps(
+        {"b": b_tag, "r": r, "d": d_tag},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).replace("/", "\\/")
+    return _checktoken_xor(payload.encode("utf-8")).hex()
+
+
+def decode_check_token(token: str) -> dict:
+    """解码 checkToken 为 JSON 结构 (用于验证/提取字段)。"""
+    raw = bytes.fromhex(token)
+    payload = _checktoken_unxor(raw).decode("utf-8")
+    return json.loads(payload)
+
+
+def generate_check_token() -> str:
+    """按逆向算法动态生成 checkToken (轮换 b_tag 池避免风控)。"""
+    global _check_token_index
+    pool = Config.CHECKTOKEN_B_TAG_POOL
+    if not pool:
+        raise SystemExit("[错误] CHECKTOKEN_B_TAG_POOL 为空,请检查 user.json。")
+    b_tag = pool[_check_token_index % len(pool)]
+    _check_token_index += 1
+    return encode_check_token(b_tag, Config.CHECKTOKEN_DEVICE_D)
+
+
+# b_tag 轮换索引 (模块级)
+_check_token_index = 0
 
 
 def eapi_encrypt(url_path: str, data: dict) -> str:
@@ -110,16 +202,13 @@ class NetEaseEapi:
 
     def __init__(self, cfg: Config = None):
         self.cfg = cfg or Config()
-        self.session = _requests.Session()
-        self._check_token_index = 0
+        self.session = requests.Session()
         self._setup_headers()
         self._setup_cookies()
 
     def _get_next_check_token(self) -> str:
-        """轮换 checkToken 池,避免重复使用导致风控。"""
-        ct = CHECKTOKEN_POOL[self._check_token_index % len(CHECKTOKEN_POOL)]
-        self._check_token_index += 1
-        return ct
+        """按逆向算法动态生成 checkToken (轮换 b_tag 池避免风控)。"""
+        return generate_check_token()
 
     def _setup_headers(self):
         c = self.cfg
@@ -151,26 +240,26 @@ class NetEaseEapi:
 
     def _setup_cookies(self):
         c = self.cfg
-        cookies = {
-            "MUSIC_U": c.MUSIC_U,
-            "_ntes_nuid": c.NTES_NUID,
-            "NMTID": c.NMTID,
-            "appver": c.APP_VER,
-            "buildver": c.BUILD_VER,
-            "deviceId": c.DEVICE_ID,
-            "sDeviceId": c.DEVICE_ID,
-            "os": "iPhone OS",
-            "osver": c.OS_VER,
-            "channel": "distribution",
-            "appkey": "IuRPVVmc3WWul9fT",
-            "EVNSM": "1.0.0",
-            "machineid": "iPhone16.1",
-            "packageType": "release",
-            "idfv": c.IDFV,
-            "idfa": "",
-            "ntes_kaola_ad": "1",
-            "_iuqxldmzr_": "33",
-        }
+        cookies = self.cfg._nonempty(
+            MUSIC_U=c.MUSIC_U,
+            _ntes_nuid=c.NTES_NUID,
+            NMTID=c.NMTID,
+            appver=c.APP_VER,
+            buildver=c.BUILD_VER,
+            deviceId=c.DEVICE_ID,
+            sDeviceId=c.DEVICE_ID,
+            os="iPhone OS",
+            osver=c.OS_VER,
+            channel="distribution",
+            appkey="IuRPVVmc3WWul9fT",
+            EVNSM="1.0.0",
+            machineid="iPhone16.1",
+            packageType="release",
+            idfv=c.IDFV,
+            idfa="",
+            ntes_kaola_ad="1",
+            _iuqxldmzr_="33",
+        )
         for k, v in cookies.items():
             self.session.cookies.set(k, v, domain=".music.163.com")
 
@@ -197,11 +286,15 @@ class NetEaseEapi:
         decrypted = eapi_decrypt_response(resp.content)
         return json.loads(decrypted)
 
+    def _make_ad_req_id(self) -> str:
+        """构造广告请求 ID (uid_时间戳_3963)。"""
+        return f"{self.cfg.USER_ID}_{int(time.time() * 1000)}_3963"
+
     def yunbei_login(self) -> dict:
         """初始化云贝广告会话(使用 ne_AFN mark)。"""
-        c = self.cfg
         extra_headers = {"X-MAM-CustomMark": "ne_AFN"}
-        return self.request("/api/ad/listening/new/yunbei/login/request", {}, extra_headers=extra_headers)
+        return self.request("/api/ad/listening/new/yunbei/login/request", {},
+                            extra_headers=extra_headers)
 
     def get_stage_info(self) -> dict:
         """查询免费听活动进度。"""
@@ -213,60 +306,60 @@ class NetEaseEapi:
     def get_ad(self) -> dict:
         """请求激励广告。"""
         c = self.cfg
-        ad_ext = {
-            "ipv4": "",
-            "fromRN": "1",
-            "isNeedGetRights": "false",
-            "opensdkVer": "2.0.4",
-            "ext": {
-                "teenMode": False,
-                "ipv4": "",
-                "sourceFrame": "note",
-                "homePageType": 1,
-                "wxInstalled": True,
-                "iyunVersion": c.IYUN_VERSION,
-                "iyunId": c.IYUN_ID,
-                "opensdkVer": "2.0.4",
-                "idfv": c.IDFV,
-                "lastIyunId": c.LAST_IYUN_ID,
-                "supportWechatCanvas": True,
-                "lastIyunVersion": c.LAST_IYUN_VERSION,
-            },
-            "lbs": {"longitude": c.LONGITUDE, "latitude": c.LATITUDE},
-            "adReqId": f"1773290531_{int(time.time() * 1000)}_3963",
-            "isNativeSampling": False,
-            "network": 1,
-            "lastIyunVersion": c.LAST_IYUN_VERSION,
-            "iyunVersion": c.IYUN_VERSION,
-            "teenMode": False,
-            "ipv6": "",
-            "source": "132",
-            "op": "0",
-            "useragent": (
+        ad_ext = c._nonempty(
+            ipv4="",
+            fromRN="1",
+            isNeedGetRights="false",
+            opensdkVer="2.0.4",
+            ext=c._nonempty(
+                teenMode=False,
+                ipv4="",
+                sourceFrame="note",
+                homePageType=1,
+                wxInstalled=True,
+                iyunVersion=c.IYUN_VERSION,
+                iyunId=c.IYUN_ID,
+                opensdkVer="2.0.4",
+                idfv=c.IDFV,
+                lastIyunId=c.LAST_IYUN_ID,
+                supportWechatCanvas=True,
+                lastIyunVersion=c.LAST_IYUN_VERSION,
+            ),
+            lbs=c._nonempty(longitude=c.LONGITUDE, latitude=c.LATITUDE),
+            adReqId=self._make_ad_req_id(),
+            isNativeSampling=False,
+            network=1,
+            lastIyunVersion=c.LAST_IYUN_VERSION,
+            iyunVersion=c.IYUN_VERSION,
+            teenMode=False,
+            ipv6="",
+            source="132",
+            op="0",
+            useragent=(
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
             ),
-            "homePageType": 1,
-            "supportWechatCanvas": True,
-            "wxInstalled": True,
-            "newAgent": (
+            homePageType=1,
+            supportWechatCanvas=True,
+            wxInstalled=True,
+            newAgent=(
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
             ),
-            "idfv": c.IDFV,
-            "idfa": "00000000-0000-0000-0000-000000000000",
-            "resourceId": "0",
-            "iyunId": c.IYUN_ID,
-            "openudid": c.OPENUDID,
-            "sourceFrame": "note",
-            "appState": 0,
-            "adPosition": c.AD_POSITION,
-            "lastIyunId": c.LAST_IYUN_ID,
-            "resolution": {"width": 1179, "height": 2556},
-            "pid": "0",
-            "isShowEndToast": "true",
-            "showRightsEndDialog": "false",
-        }
+            idfv=c.IDFV,
+            idfa="00000000-0000-0000-0000-000000000000",
+            resourceId="0",
+            iyunId=c.IYUN_ID,
+            openudid=c.OPENUDID,
+            sourceFrame="note",
+            appState=0,
+            adPosition=c.AD_POSITION,
+            lastIyunId=c.LAST_IYUN_ID,
+            resolution={"width": 1179, "height": 2556},
+            pid="0",
+            isShowEndToast="true",
+            showRightsEndDialog="false",
+        )
         return self.request("/api/ad/get", {
             "adextjson": json.dumps(ad_ext, separators=(",", ":")),
             "type_ids": json.dumps([f"{c.AD_POSITION}_0"]),
@@ -274,25 +367,25 @@ class NetEaseEapi:
 
     def _build_dev_info(self) -> str:
         c = self.cfg
-        dev_info = {
-            "ipv4": "",
-            "idfa": "00000000-0000-0000-0000-000000000000",
-            "iyunVersion": c.IYUN_VERSION,
-            "useragent": (
+        dev_info = c._nonempty(
+            ipv4="",
+            idfa="00000000-0000-0000-0000-000000000000",
+            iyunVersion=c.IYUN_VERSION,
+            useragent=(
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
             ),
-            "seq": int(time.time()) % 10000,
-            "iyunId": c.IYUN_ID,
-            "openudid": c.OPENUDID,
-            "lastIyunId": c.LAST_IYUN_ID,
-            "lbs": {"longitude": c.LONGITUDE, "latitude": c.LATITUDE},
-            "ipv6": "",
-            "network": 1,
-            "op": "0",
-            "resolution": {"width": 1179, "height": 2556},
-            "lastIyunVersion": c.LAST_IYUN_VERSION,
-        }
+            seq=int(time.time()) % 10000,
+            iyunId=c.IYUN_ID,
+            openudid=c.OPENUDID,
+            lastIyunId=c.LAST_IYUN_ID,
+            lbs=c._nonempty(longitude=c.LONGITUDE, latitude=c.LATITUDE),
+            ipv6="",
+            network=1,
+            op="0",
+            resolution={"width": 1179, "height": 2556},
+            lastIyunVersion=c.LAST_IYUN_VERSION,
+        )
         return json.dumps(dev_info, separators=(",", ":"))
 
     def report_impress(self, ad_data: dict) -> dict:
@@ -311,8 +404,6 @@ class NetEaseEapi:
 
     def claim_rights(self, req_param: dict, check_token: str = "") -> dict:
         """领取免费听权益。
-
-        真实App需要在Header中同时传递 x-anticheattoken。
         """
         extra_headers = {"X-AntiCheatToken": check_token}
         return self.request("/api/ad/listening/rights/gain", {
@@ -402,7 +493,7 @@ def build_ad_data_for_monitor(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
         "material": ci.get("material_id", ""),
         "onlineTime": ad_info.get("onlineTime", 0),
         "isNativeSampling": False,
-        "lbs": {"longitude": cfg.LONGITUDE, "latitude": cfg.LATITUDE},
+        "lbs": cfg._nonempty(longitude=cfg.LONGITUDE, latitude=cfg.LATITUDE),
         "type": ad_info.get("type", 400002),
         "adsource_ssp": ci.get("dsp_id", ""),
         "dspid": ci.get("dsp_id", ""),
@@ -526,13 +617,13 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
           f"停留:{gri.get('clickStayTime', '未知')} 秒,"
           f"有效间隔:{gri.get('validVideoInterval', '未知')} 秒")
 
-    # 轮换 checkToken 池
+    # 轮换 checkToken (算法生成)
     check_token = client._get_next_check_token()
     print(f"  checkToken: {check_token[:40]}... (长度: {len(check_token)})")
 
     ad_req_id = ad_info.get("requestId", "")
     if not ad_req_id:
-        ad_req_id = f"1773290531_{int(time.time() * 1000)}_3963"
+        ad_req_id = client._make_ad_req_id()
 
     print("[2/4] 上报广告曝光...")
     ad_data = build_ad_data_for_monitor(ad_info, ad_req_id, cfg)
@@ -591,6 +682,8 @@ def main():
     )
     args = parser.parse_args()
 
+    Config.validate()
+
     cfg = Config()
     cfg.WATCH_DELAY = args.watch_time
 
@@ -615,11 +708,6 @@ def main():
         maximum_amount = sd.get('maximumAmount', 0)
         print(f"  当前进度:{current_amount}/{maximum_amount}")
         print(f"  当前阶段:{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
-
-        if maximum_amount > 0 and current_amount >= maximum_amount:
-            print("\n  ⚠️ 每日免费听权益已领完,无需继续!")
-            print("\n执行完成!")
-            return
     except Exception as e:
         print(f"  查询进度异常:{e}")
 
