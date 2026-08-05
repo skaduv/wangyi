@@ -9,11 +9,13 @@ import base64
 import gzip
 import hashlib
 import json
+import secrets
 import time
+import hmac
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-import requests
+import requests as _requests
 
 
 import os as _os
@@ -64,6 +66,16 @@ EAPI_KEY = b"e82ckenh8dichen8"
 EAPI_NONCE = "36cd479b6b5"
 EAPI_SIGN_SALT = "md5forencrypt"
 
+# 从真实App抓包中提取的 checkToken 池(设备绑定,长期有效)
+# 每个 checkToken 包含不同的 b_tag,服务端用于验证设备指纹
+# 由于 b_tag 与时间戳的哈希算法是易盾SDK内部实现(无法逆向),
+# 直接复用这些已验证的 checkToken
+CHECKTOKEN_POOL = [
+    "9ca16ae2e6ee8ec84fbcb387d9c86efb9a8ea3c44e829f9eadd77ab28d8baec5798eb6a8b4eb2af0febec3b940f0feacc3b92a888ffdd4d86096ebfea7eb4e928e9aa2c44a9489beccd858ed9b8cabc64088eeadc300",
+    "9ca16ae2e6ee98d55ca0f1fc84ce6af190fba6d1c1efa9a8db7ba0f19ca7e74af1e9aca2e579e2f4ee93a132f8f4ee85a132e29c9fd4b25f988afbd3c564868e9eb7c44b82909993aa5fa0f18ba5c94df89cfe84a177",
+    "9ca16ae2e6eeb6eb6785ed8383e76295968fb6d1c1efa9a8db7ba0f19ca7e74af1e9aca2e579e2f4ee93a132f8f4ee85a132e29c9fd4b25f988afbd3c564868e9eb7c44b82909993aa5fa0f18ba5c94df89cfe84a177",
+]
+
 
 def eapi_encrypt(url_path: str, data: dict) -> str:
     """按 eapi 协议加密请求参数。"""
@@ -79,7 +91,7 @@ def eapi_encrypt(url_path: str, data: dict) -> str:
 
 
 def eapi_decrypt_response(raw_bytes: bytes) -> str:
-    """解密 eapi 响应内容，并处理可能的 gzip 压缩。"""
+    """解密 eapi 响应内容,并处理可能的 gzip 压缩。"""
     cipher = AES.new(EAPI_KEY, AES.MODE_ECB)
     decrypted = cipher.decrypt(raw_bytes)
     try:
@@ -98,9 +110,16 @@ class NetEaseEapi:
 
     def __init__(self, cfg: Config = None):
         self.cfg = cfg or Config()
-        self.session = requests.Session()
+        self.session = _requests.Session()
+        self._check_token_index = 0
         self._setup_headers()
         self._setup_cookies()
+
+    def _get_next_check_token(self) -> str:
+        """轮换 checkToken 池,避免重复使用导致风控。"""
+        ct = CHECKTOKEN_POOL[self._check_token_index % len(CHECKTOKEN_POOL)]
+        self._check_token_index += 1
+        return ct
 
     def _setup_headers(self):
         c = self.cfg
@@ -120,7 +139,7 @@ class NetEaseEapi:
             "X-OSVer": c.OS_VER,
             "X-Aeapi": "true",
             "X-Music-U": c.MUSIC_U,
-            "X-MAM-CustomMark": "ne_AFN",
+            "X-MAM-CustomMark": "nm_Cronet",   # 广告请求使用 nm_Cronet
             "X-Netlib": "Cronet",
             "MConfig-Info": json.dumps({
                 "zr4bw6pKFDIZScpo": {"version": 3807232, "appver": c.APP_VER},
@@ -155,7 +174,7 @@ class NetEaseEapi:
         for k, v in cookies.items():
             self.session.cookies.set(k, v, domain=".music.163.com")
 
-    def request(self, api_path: str, data: dict) -> dict:
+    def request(self, api_path: str, data: dict, extra_headers: dict = None) -> dict:
         """发送 eapi 请求并返回解密后的 JSON 数据。"""
         url = f"{self.BASE_URL}/eapi{api_path.replace('/api', '', 1)}"
         c = self.cfg
@@ -167,16 +186,22 @@ class NetEaseEapi:
         data.setdefault("e_r", True)
 
         encrypted = eapi_encrypt(api_path, data)
-        resp = self.session.post(url, data={"params": encrypted}, timeout=30)
+
+        headers = {}
+        if extra_headers:
+            headers.update(extra_headers)
+
+        resp = self.session.post(url, data={"params": encrypted}, headers=headers, timeout=30)
         resp.raise_for_status()
 
         decrypted = eapi_decrypt_response(resp.content)
         return json.loads(decrypted)
 
-
     def yunbei_login(self) -> dict:
-        """初始化云贝广告会话。"""
-        return self.request("/api/ad/listening/new/yunbei/login/request", {})
+        """初始化云贝广告会话(使用 ne_AFN mark)。"""
+        c = self.cfg
+        extra_headers = {"X-MAM-CustomMark": "ne_AFN"}
+        return self.request("/api/ad/listening/new/yunbei/login/request", {}, extra_headers=extra_headers)
 
     def get_stage_info(self) -> dict:
         """查询免费听活动进度。"""
@@ -285,11 +310,15 @@ class NetEaseEapi:
         })
 
     def claim_rights(self, req_param: dict, check_token: str = "") -> dict:
-        """领取免费听权益。"""
+        """领取免费听权益。
+
+        真实App需要在Header中同时传递 x-anticheattoken。
+        """
+        extra_headers = {"X-AntiCheatToken": check_token}
         return self.request("/api/ad/listening/rights/gain", {
             "checkToken": check_token,
             "reqParam": json.dumps(req_param, separators=(",", ":")),
-        })
+        }, extra_headers=extra_headers)
 
     def get_free_listen_data(self) -> dict:
         """获取免费听权益数据。"""
@@ -467,57 +496,62 @@ def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
 
 
 def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
-    """执行一轮广告领取流程，并返回是否领取成功。"""
+    """执行一轮广告领取流程,并返回是否领取成功。"""
     print(f"\n{'=' * 60}")
     print(f"  第 {round_num} 轮")
     print(f"{'=' * 60}")
 
-    print("[1/4] 请求广告…")
+    print("[1/4] 请求广告...")
     ad_resp = client.get_ad()
 
     if ad_resp.get("code") != 200:
-        print(f"  请求广告失败：{ad_resp.get('message', '未知错误')}")
+        print(f"  请求广告失败:{ad_resp.get('message', '未知错误')}")
         return False
 
     ads = ad_resp.get("ads", {})
     ad_key = f"{cfg.AD_POSITION}_0"
 
     if ad_key not in ads:
-        print(f"  没有可用广告：{ad_resp.get('message', '无')}")
+        print(f"  没有可用广告:{ad_resp.get('message', '无')}")
         return False
 
     ad_info = ads[ad_key]
     ci = _get_context_info(ad_info)
     gri = _parse_json(ad_info.get("generalRightsInfo"))
+    lri = ad_info.get("listeningRightsInfo") or {}
 
-    print(f"  广告：{ad_info.get('text', '无标题')[:60]}")
+    print(f"  广告:{ad_info.get('text', '无标题')[:60]}")
     print(f"  ad_id: {ad_info.get('ad_id')}, req_id: {ci.get('req_id', 'N/A')}")
-    print(f"  领取方式：{gri.get('rightsGainMethod', '未知')}，"
-          f"停留：{gri.get('clickStayTime', '未知')} 秒，"
-          f"有效间隔：{gri.get('validVideoInterval', '未知')} 秒")
+    print(f"  领取方式:{gri.get('rightsGainMethod', '未知')},"
+          f"停留:{gri.get('clickStayTime', '未知')} 秒,"
+          f"有效间隔:{gri.get('validVideoInterval', '未知')} 秒")
+
+    # 轮换 checkToken 池
+    check_token = client._get_next_check_token()
+    print(f"  checkToken: {check_token[:40]}... (长度: {len(check_token)})")
 
     ad_req_id = ad_info.get("requestId", "")
     if not ad_req_id:
         ad_req_id = f"1773290531_{int(time.time() * 1000)}_3963"
 
-    print("[2/4] 上报广告曝光…")
+    print("[2/4] 上报广告曝光...")
     ad_data = build_ad_data_for_monitor(ad_info, ad_req_id, cfg)
     impress_resp = client.report_impress(ad_data)
-    print(f"  曝光上报结果：code={impress_resp.get('code')}")
+    print(f"  曝光上报结果:code={impress_resp.get('code')}")
 
-    print(f"  模拟观看 {cfg.WATCH_DELAY} 秒…")
+    print(f"  模拟观看 {cfg.WATCH_DELAY} 秒...")
     time.sleep(cfg.WATCH_DELAY)
 
-    print("[3/4] 上报广告点击…")
+    print("[3/4] 上报广告点击...")
     ad_data["clickTime"] = int(time.time() * 1000)
     click_resp = client.report_click(ad_data)
-    print(f"  点击上报结果：code={click_resp.get('code')}")
+    print(f"  点击上报结果:code={click_resp.get('code')}")
 
     time.sleep(cfg.CLAIM_DELAY)
 
-    print("[4/4] 领取免费听权益…")
+    print("[4/4] 领取免费听权益...")
     req_param = build_rights_claim_params(ad_info, ad_req_id, cfg)
-    gain_resp = client.claim_rights(req_param, check_token="")
+    gain_resp = client.claim_rights(req_param, check_token=check_token)
 
     code = gain_resp.get("code")
     msg = gain_resp.get("message", "")
@@ -528,13 +562,13 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
     rights_duration = data.get("gainRightsDuration") if isinstance(data, dict) else None
     rights_unit = data.get("rightsDurationUnit") if isinstance(data, dict) else None
 
-    print(f"  领取结果：code={code}，成功={gain_flag}")
+    print(f"  领取结果:code={code},成功={gain_flag}")
     if msg:
-        print(f"  消息：{msg}")
+        print(f"  消息:{msg}")
     if show_content:
-        print(f"  内容：{show_content}")
+        print(f"  内容:{show_content}")
     if rights_duration:
-        print(f"  获得时长：{rights_duration} {rights_unit or ''}")
+        print(f"  获得时长:{rights_duration} {rights_unit or ''}")
 
     return gain_flag
 
@@ -545,15 +579,15 @@ def main():
     )
     parser.add_argument(
         "--rounds", type=int, default=Config.MAX_ROUNDS,
-        help="广告执行轮数（默认：10）"
+        help="广告执行轮数(默认:10)"
     )
     parser.add_argument(
         "--delay", type=int, default=Config.ROUND_DELAY,
-        help="轮次之间的间隔秒数（默认：10）"
+        help="轮次之间的间隔秒数(默认:10)"
     )
     parser.add_argument(
         "--watch-time", type=int, default=Config.WATCH_DELAY,
-        help="模拟观看广告的秒数（默认：16）"
+        help="模拟观看广告的秒数(默认:16)"
     )
     args = parser.parse_args()
 
@@ -566,21 +600,28 @@ def main():
     print("  网易云音乐看广告免费听自动化工具")
     print("=" * 60)
 
-    print("\n[初始化] 云贝登录…")
+    print("\n[初始化] 云贝登录...")
     try:
         login_resp = client.yunbei_login()
         print(f"  code={login_resp.get('code')}")
     except Exception as e:
-        print(f"  登录异常：{e}")
+        print(f"  登录异常:{e}")
 
-    print("\n[初始化] 查询免费听进度…")
+    print("\n[初始化] 查询免费听进度...")
     try:
         stage = client.get_stage_info()
         sd = stage.get("data", {})
-        print(f"  当前进度：{sd.get('currentAmount', '未知')}/{sd.get('maximumAmount', '未知')}")
-        print(f"  当前阶段：{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
+        current_amount = sd.get('currentAmount', 0)
+        maximum_amount = sd.get('maximumAmount', 0)
+        print(f"  当前进度:{current_amount}/{maximum_amount}")
+        print(f"  当前阶段:{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
+
+        if maximum_amount > 0 and current_amount >= maximum_amount:
+            print("\n  ⚠️ 每日免费听权益已领完,无需继续!")
+            print("\n执行完成!")
+            return
     except Exception as e:
-        print(f"  查询进度异常：{e}")
+        print(f"  查询进度异常:{e}")
 
     success_count = 0
     fail_count = 0
@@ -592,29 +633,29 @@ def main():
             else:
                 fail_count += 1
         except Exception as e:
-            print(f"  本轮执行异常：{e}")
+            print(f"  本轮执行异常:{e}")
             fail_count += 1
 
         if i < args.rounds:
-            print(f"\n  等待 {args.delay} 秒后开始下一轮…")
+            print(f"\n  等待 {args.delay} 秒后开始下一轮...")
             time.sleep(args.delay)
 
     print("\n" + "=" * 60)
     print("  执行汇总")
     print("=" * 60)
-    print(f"  总轮数：{args.rounds}")
-    print(f"  成功：{success_count}")
-    print(f"  失败：{fail_count}")
+    print(f"  总轮数:{args.rounds}")
+    print(f"  成功:{success_count}")
+    print(f"  失败:{fail_count}")
 
     try:
         stage = client.get_stage_info()
         sd = stage.get("data", {})
-        print(f"\n  最终进度：{sd.get('currentAmount', '未知')}/{sd.get('maximumAmount', '未知')}")
-        print(f"  最终阶段：{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
+        print(f"\n  最终进度:{sd.get('currentAmount', '未知')}/{sd.get('maximumAmount', '未知')}")
+        print(f"  最终阶段:{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
     except Exception:
         pass
 
-    print("\n执行完成！")
+    print("\n执行完成!")
 
 
 if __name__ == "__main__":
