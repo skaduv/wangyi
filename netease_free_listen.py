@@ -573,6 +573,7 @@ def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
         "isShowEndToast": "true",
         "validVideoInterval": gri.get("validVideoInterval", lri.get("validVideoInterval", 15)),
         "showElement": gri.get("showElement", {}),
+        "sniffTime": 0,
         "generalRightsInfo": ad_info.get("generalRightsInfo", ""),
         "nextRightsGainDuration": lri.get("nextRightsGainDuration", 0),
         "exposureTime": now_ms,
