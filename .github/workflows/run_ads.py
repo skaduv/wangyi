@@ -8,6 +8,11 @@ GitHub Actions 执行脚本 - 随机间隔看广告
   - 每次广告间隔 2~8 分钟 (随机)
   - 每 5 次广告后间隔 20~50 分钟 (随机)
   - 默认 10 次广告
+  - 广告计数由主脚本持久化到 ad_state.json (actions/cache 缓存, 按天重置)
+
+退出码约定 (主脚本 netease_free_listen.py):
+  - 0: 正常完成
+  - 2: 当天广告次数已用完, 停止后续轮次
 """
 
 import os
@@ -62,6 +67,9 @@ def main():
             if result.returncode == 0:
                 success += 1
                 log(f"第 {i} 轮 完成")
+            elif result.returncode == 2:
+                log(f"第 {i} 轮 当天广告次数已用完, 停止")
+                break
             else:
                 fail += 1
                 log(f"第 {i} 轮失败（退出码：{result.returncode}）")

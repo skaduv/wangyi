@@ -34,6 +34,22 @@ jobs:
       - name: 安装依赖
         run: pip install requests pycryptodome
 
+      - name: 计算北京时间日期 (用于广告计数缓存 key)
+        run: echo "AD_STATE_DATE=$(TZ='Asia/Shanghai' date +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      # 广告计数持久化: GitHub Actions 每次运行是全新环境, 本地文件会丢失。
+      # 用 actions/cache 按日期缓存 ad_state.json:
+      #   - key 带文件哈希: 每次计数变化后生成新 key, 保证 save 阶段总能写入
+      #   - restore-keys 按日期前缀匹配: 同一天多次调度恢复最新计数
+      #   - 跨天自动生成新前缀, 实现计数重置
+      - name: 恢复广告计数缓存
+        uses: actions/cache@v4
+        with:
+          path: ad_state.json
+          key: ad-state-${{ env.AD_STATE_DATE }}-${{ hashFiles('ad_state.json') }}
+          restore-keys: |
+            ad-state-${{ env.AD_STATE_DATE }}-
+
       - name: 检查 user.json 配置
         run: python3 .github/workflows/inject_config.py
 
