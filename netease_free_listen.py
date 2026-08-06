@@ -78,9 +78,8 @@ class Config:
     ROUND_DELAY = 10
 
     # ---- App 规则 (看广告免费听权益) ----
-    # 每看 AD_PER_RIGHTS 次广告可领取 1 次权益,每天最多看 AD_DAILY_LIMIT 次广告
-    AD_PER_RIGHTS = 5
-    AD_DAILY_LIMIT = 10
+    # 每支广告观看完成后立即领取 1 次权益 (与 App 行为一致);
+    # 每日上限由服务端 rights/gain 的 gainFlag 判定
 
     @classmethod
     def validate(cls):
@@ -173,65 +172,6 @@ def generate_check_token() -> str:
 
 # b_tag 轮换索引 (模块级)
 _check_token_index = 0
-
-# ============================================================
-# 广告观看计数 (App 规则: 看 5 次广告领取 1 次权益, 每天最多 10 次广告)
-# 计数持久化到 ad_state.json, 跨进程运行 (GitHub Actions 多次调用) 共享,
-# 跨天自动重置。
-# ============================================================
-
-_AD_STATE_FILE = os.path.join(_BASE_DIR, "ad_state.json")
-
-
-def _today_str() -> str:
-    """本地日期字符串 (YYYY-MM-DD)。"""
-    return time.strftime("%Y-%m-%d")
-
-
-def _load_ad_state() -> dict:
-    """读取广告计数状态,文件缺失或损坏时返回空记录。"""
-    if not os.path.exists(_AD_STATE_FILE):
-        return {"date": "", "watched": 0}
-    try:
-        with open(_AD_STATE_FILE, "r", encoding="utf-8") as f:
-            state = json.load(f)
-        if state.get("date") != _today_str():
-            return {"date": "", "watched": 0}
-        return {"date": state.get("date", ""), "watched": int(state.get("watched", 0))}
-    except (json.JSONDecodeError, OSError, ValueError):
-        return {"date": "", "watched": 0}
-
-
-def _save_ad_state(watched: int):
-    """保存广告计数状态 (仅保存当天数据,跨天自动重置)。"""
-    try:
-        with open(_AD_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"date": _today_str(), "watched": watched}, f)
-    except OSError:
-        pass
-
-
-def get_ad_progress() -> tuple:
-    """返回 (今天已看广告数, 今天剩余可看广告数)。
-
-    首次调用时会确保 ad_state.json 文件存在 (供 GitHub Actions
-    actions/cache 持久化计数)。
-    """
-    state = _load_ad_state()
-    if not os.path.exists(_AD_STATE_FILE):
-        _save_ad_state(0)
-    watched = state["watched"]
-    remaining = max(0, Config.AD_DAILY_LIMIT - watched)
-    return watched, remaining
-
-
-def record_ad_watched() -> int:
-    """记录一次广告观看,返回当天累计观看次数。"""
-    state = _load_ad_state()
-    watched = state["watched"] + 1
-    _save_ad_state(watched)
-    return watched
-
 
 def eapi_encrypt(url_path: str, data: dict) -> str:
     """按 eapi 协议加密请求参数。"""
@@ -651,32 +591,32 @@ def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
     }
 
 
-def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
-    """执行一轮广告观看流程。
+def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
+    """执行一轮「观看广告 + 领取权益」流程。
 
-    App 规则: 每看 AD_PER_RIGHTS 次广告可领取 1 次权益, 每天最多
-    AD_DAILY_LIMIT 次广告。本函数只负责观看广告 (请求/曝光/点击),
-    是否领取由调用方根据累计次数决定。
+    与 App 行为一致: 每支广告观看完成后立即领取 1 次权益 (拼图/免费听时长)。
+    领取必须复用刚观看的这支广告的 contextInfo/requestId —— 服务端按该广告的
+    曝光/点击记录判定领取有效性, 重新请求的新广告 (无曝光记录) 无法领取。
 
-    返回: 广告观看是否成功。
+    返回: (观看是否成功, 领取是否成功)。
     """
     print(f"\n{'=' * 60}")
-    print(f"  第 {round_num} 轮 (观看广告)")
+    print(f"  第 {round_num} 轮")
     print(f"{'=' * 60}")
 
-    print("[1/3] 请求广告...")
+    print("[1/4] 请求广告...")
     ad_resp = client.get_ad()
 
     if ad_resp.get("code") != 200:
         print(f"  请求广告失败:{ad_resp.get('message', '未知错误')}")
-        return False
+        return False, False
 
     ads = ad_resp.get("ads", {})
     ad_key = f"{cfg.AD_POSITION}_0"
 
     if ad_key not in ads:
         print(f"  没有可用广告:{ad_resp.get('message', '无')}")
-        return False
+        return False, False
 
     ad_info = ads[ad_key]
     ci = _get_context_info(ad_info)
@@ -697,7 +637,7 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
     if not ad_req_id:
         ad_req_id = client._make_ad_req_id()
 
-    print("[2/3] 上报广告曝光...")
+    print("[2/4] 上报广告曝光...")
     ad_data = build_ad_data_for_monitor(ad_info, ad_req_id, cfg)
     impress_resp = client.report_impress(ad_data)
     print(f"  曝光上报结果:code={impress_resp.get('code')}")
@@ -705,44 +645,15 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
     print(f"  模拟观看 {cfg.WATCH_DELAY} 秒...")
     time.sleep(cfg.WATCH_DELAY)
 
-    print("[3/3] 上报广告点击...")
+    print("[3/4] 上报广告点击...")
     ad_data["clickTime"] = int(time.time() * 1000)
     click_resp = client.report_click(ad_data)
     print(f"  点击上报结果:code={click_resp.get('code')}")
 
-    return True
-
-
-def claim_rights_once(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
-    """领取一次免费听权益,返回是否领取成功。"""
-    print(f"\n  第 {round_num} 轮 (领取权益)")
-    print(f"{'=' * 60}")
-
-    # 需重新请求广告以获取领取所需的 contextInfo/reqUid 等参数
-    print("[1/2] 请求广告...")
-    ad_resp = client.get_ad()
-
-    if ad_resp.get("code") != 200:
-        print(f"  请求广告失败:{ad_resp.get('message', '未知错误')}")
-        return False
-
-    ads = ad_resp.get("ads", {})
-    ad_key = f"{cfg.AD_POSITION}_0"
-    if ad_key not in ads:
-        print(f"  没有可用广告:{ad_resp.get('message', '无')}")
-        return False
-
-    ad_info = ads[ad_key]
-    ad_req_id = ad_info.get("requestId", "")
-    if not ad_req_id:
-        ad_req_id = client._make_ad_req_id()
-
-    check_token = client._get_next_check_token()
-    print(f"  checkToken: {check_token[:40]}... (长度: {len(check_token)})")
-
+    # 广告观看完成, 立即领取 (复用同一广告的请求参数)
     time.sleep(cfg.CLAIM_DELAY)
 
-    print("[2/2] 领取免费听权益...")
+    print("[4/4] 领取免费听权益...")
     req_param = build_rights_claim_params(ad_info, ad_req_id, cfg)
     gain_resp = client.claim_rights(req_param, check_token=check_token)
 
@@ -763,7 +674,7 @@ def claim_rights_once(client: NetEaseEapi, round_num: int, cfg: Config) -> bool:
     if rights_duration:
         print(f"  获得时长:{rights_duration} {rights_unit or ''}")
 
-    return gain_flag
+    return True, gain_flag
 
 
 def main():
@@ -794,17 +705,8 @@ def main():
     print("=" * 60)
     print("  网易云音乐看广告免费听自动化工具")
     print("=" * 60)
-    print(f"  App 规则: 每看 {cfg.AD_PER_RIGHTS} 次广告领取 1 次权益,"
-          f"每天最多看 {cfg.AD_DAILY_LIMIT} 次广告")
-
-    # 读取当天广告计数,判断剩余可看次数
-    watched, remaining = get_ad_progress()
-    print(f"\n[初始化] 广告计数: 今天已看 {watched}/{cfg.AD_DAILY_LIMIT} 次,"
-          f"剩余 {remaining} 次")
-    if remaining <= 0:
-        print("  今天广告次数已用完,请明天再试。")
-        # 退出码 2: 当天次数已满,供调度脚本 (run_ads.py) 识别并停止
-        sys.exit(2)
+    print("  App 规则: 每支广告观看完成后立即领取 1 次权益,"
+          "每日上限由服务端判定 (gainFlag)")
 
     print("\n[初始化] 云贝登录...")
     try:
@@ -824,10 +726,7 @@ def main():
     except Exception as e:
         print(f"  查询进度异常:{e}")
 
-    # 实际可执行轮数 = min(请求轮数, 当天剩余广告次数)
-    rounds = min(args.rounds, remaining)
-    if rounds < args.rounds:
-        print(f"\n  当天剩余广告次数不足,本次只执行 {rounds} 轮。")
+    rounds = args.rounds
 
     watch_success = 0
     watch_fail = 0
@@ -835,31 +734,27 @@ def main():
     claim_fail = 0
 
     for i in range(1, rounds + 1):
-        # 观看广告
+        # 观看广告 + 领取权益 (每轮立即领取,与 App 行为一致)
         try:
-            if run_one_round(client, i, cfg):
-                watch_success += 1
-                watched_count = record_ad_watched()
-                print(f"  今日累计观看: {watched_count}/{cfg.AD_DAILY_LIMIT} 次")
-            else:
-                watch_fail += 1
-                continue
+            watch_ok, gain_ok = run_one_round(client, i, cfg)
         except Exception as e:
-            print(f"  本轮观看异常:{e}")
+            print(f"  本轮异常:{e}")
             watch_fail += 1
             continue
 
-        # 每看 AD_PER_RIGHTS 次广告领取 1 次权益
-        if watched_count % cfg.AD_PER_RIGHTS == 0:
-            print(f"\n  已连续观看 {cfg.AD_PER_RIGHTS} 次广告,开始领取权益...")
-            try:
-                if claim_rights_once(client, i, cfg):
-                    claim_success += 1
-                else:
-                    claim_fail += 1
-            except Exception as e:
-                print(f"  领取异常:{e}")
-                claim_fail += 1
+        if not watch_ok:
+            watch_fail += 1
+            continue
+
+        watch_success += 1
+
+        if gain_ok:
+            claim_success += 1
+        else:
+            claim_fail += 1
+            # 领取失败 (如已达每日上限) 时提前停止,避免继续消耗广告次数
+            print("  权益领取失败,提前停止本轮执行。")
+            break
 
         if i < rounds:
             print(f"\n  等待 {args.delay} 秒后开始下一轮...")
@@ -870,9 +765,6 @@ def main():
     print("=" * 60)
     print(f"  观看广告: 成功 {watch_success}, 失败 {watch_fail}")
     print(f"  领取权益: 成功 {claim_success}, 失败 {claim_fail}")
-    watched_final, remaining_final = get_ad_progress()
-    print(f"  今日广告计数: {watched_final}/{cfg.AD_DAILY_LIMIT} 次,"
-          f"剩余 {remaining_final} 次")
 
     try:
         stage = client.get_stage_info()
@@ -883,6 +775,11 @@ def main():
         pass
 
     print("\n执行完成!")
+
+    # 退出码 2: 当天次数已用完 (广告次数不足或领取被服务端拒绝),
+    # 供调度脚本 (run_ads.py) 识别并停止后续轮次
+    if claim_fail > 0:
+        sys.exit(2)
 
 
 if __name__ == "__main__":
