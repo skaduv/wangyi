@@ -1,6 +1,9 @@
 # 用户凭证/配置 - 包含敏感信息,禁止提交
 
 
+# b_tag 轮换状态 (按天记录,本机生成)
+b_tag_state.json
+
 # 逆向分析临时文件
 analyze.py
 analyze_tokens.py

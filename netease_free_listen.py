@@ -159,19 +159,75 @@ def decode_check_token(token: str) -> dict:
     return json.loads(payload)
 
 
+# ============================================================
+# b_tag 轮换索引 (跨进程持久化)
+#
+# 实测 (2026-08-06): 服务端对 checkToken 的 b_tag 按「当日单次」判定 ——
+# 同一 b_tag 当天约可成功领取 1 次权益, 复用会被 rights/gain 拒绝
+# (code=2002, 消息「休息一下，请稍后再试」, gainFlag=false)。不同 b_tag
+# 相隔数分钟即可再次成功领取。
+#
+# 调度脚本 run_ads.py 每轮以独立子进程调用本脚本, 模块级计数器每次都
+# 从 0 开始, 轮换形同虚设 (每轮都用 pool[0], 第 1 轮成功后当天即废)。
+# 因此把轮换索引持久化到 b_tag_state.json, 跨进程/跨 cron 运行共享,
+# 跨天自动重置。
+# ============================================================
+
+_B_TAG_STATE_FILE = os.path.join(_BASE_DIR, "b_tag_state.json")
+
+
+def _load_b_tag_state() -> dict:
+    """读取 b_tag 轮换索引, 跨天自动重置。文件缺失或损坏时从 0 开始。"""
+    if not os.path.exists(_B_TAG_STATE_FILE):
+        return {"date": "", "index": 0}
+    try:
+        with open(_B_TAG_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if state.get("date") != time.strftime("%Y-%m-%d"):
+            return {"date": "", "index": 0}
+        return {"date": state.get("date", ""), "index": int(state.get("index", 0))}
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {"date": "", "index": 0}
+
+
+def _save_b_tag_state(index: int):
+    """保存 b_tag 轮换索引 (仅保存当天数据, 跨天自动重置)。"""
+    try:
+        with open(_B_TAG_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"date": time.strftime("%Y-%m-%d"), "index": index}, f)
+    except OSError:
+        pass
+
+
+def current_b_tag_index() -> int:
+    """当前轮次应使用的 b_tag 索引 (基于持久化状态)。
+
+    首次调用时确保 b_tag_state.json 存在 (供 GitHub Actions
+    actions/cache 跨 cron 运行持久化轮换状态)。
+    """
+    if not os.path.exists(_B_TAG_STATE_FILE):
+        _save_b_tag_state(0)
+    return _load_b_tag_state()["index"]
+
+
+def advance_b_tag_index():
+    """领取得到服务端判定后推进轮换索引 (该 b_tag 当日不可复用)。"""
+    state = _load_b_tag_state()
+    _save_b_tag_state(state["index"] + 1)
+
+
 def generate_check_token() -> str:
-    """按逆向算法动态生成 checkToken (轮换 b_tag 池避免风控)。"""
-    global _check_token_index
+    """按逆向算法动态生成 checkToken (每轮轮换 B_TAG_POOL 中的 b_tag)。
+
+    注意: 索引推进由 advance_b_tag_index() 在领取得到服务端判定后执行,
+    不在本函数内自增 —— 广告/曝光等与领取无关的失败不应消耗 b_tag。
+    """
     pool = Config.CHECKTOKEN_B_TAG_POOL
     if not pool:
         raise SystemExit("[错误] CHECKTOKEN_B_TAG_POOL 为空,请检查 user.json。")
-    b_tag = pool[_check_token_index % len(pool)]
-    _check_token_index += 1
+    b_tag = pool[current_b_tag_index() % len(pool)]
     return encode_check_token(b_tag, Config.CHECKTOKEN_DEVICE_D)
 
-
-# b_tag 轮换索引 (模块级)
-_check_token_index = 0
 
 def eapi_encrypt(url_path: str, data: dict) -> str:
     """按 eapi 协议加密请求参数。"""
@@ -598,7 +654,7 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
     领取必须复用刚观看的这支广告的 contextInfo/requestId —— 服务端按该广告的
     曝光/点击记录判定领取有效性, 重新请求的新广告 (无曝光记录) 无法领取。
 
-    返回: (观看是否成功, 领取是否成功)。
+    返回: (观看是否成功, 领取是否成功, 领取响应 code 或 None)。
     """
     print(f"\n{'=' * 60}")
     print(f"  第 {round_num} 轮")
@@ -609,14 +665,14 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
 
     if ad_resp.get("code") != 200:
         print(f"  请求广告失败:{ad_resp.get('message', '未知错误')}")
-        return False, False
+        return False, False, None
 
     ads = ad_resp.get("ads", {})
     ad_key = f"{cfg.AD_POSITION}_0"
 
     if ad_key not in ads:
         print(f"  没有可用广告:{ad_resp.get('message', '无')}")
-        return False, False
+        return False, False, None
 
     ad_info = ads[ad_key]
     ci = _get_context_info(ad_info)
@@ -629,9 +685,12 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
           f"停留:{gri.get('clickStayTime', '未知')} 秒,"
           f"有效间隔:{gri.get('validVideoInterval', '未知')} 秒")
 
-    # 轮换 checkToken (算法生成)
+    # 轮换 checkToken (算法生成, 每轮用池中不同的 b_tag)
     check_token = client._get_next_check_token()
-    print(f"  checkToken: {check_token[:40]}... (长度: {len(check_token)})")
+    tag_index = current_b_tag_index() % len(Config.CHECKTOKEN_B_TAG_POOL)
+    tag_count = len(Config.CHECKTOKEN_B_TAG_POOL)
+    print(f"  checkToken: {check_token[:40]}... (长度: {len(check_token)}, "
+          f"b_tag[{tag_index}/{tag_count}])")
 
     ad_req_id = ad_info.get("requestId", "")
     if not ad_req_id:
@@ -674,7 +733,12 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
     if rights_duration:
         print(f"  获得时长:{rights_duration} {rights_unit or ''}")
 
-    return True, gain_flag
+    # 服务端已对该 b_tag 作出判定 (200 成功 / 2002 风控拒绝) —— 该 b_tag
+    # 当日不可复用, 推进轮换索引, 供下一轮/下一次运行使用
+    if code in (200, 2002):
+        advance_b_tag_index()
+
+    return True, gain_flag, code
 
 
 def main():
@@ -736,7 +800,7 @@ def main():
     for i in range(1, rounds + 1):
         # 观看广告 + 领取权益 (每轮立即领取,与 App 行为一致)
         try:
-            watch_ok, gain_ok = run_one_round(client, i, cfg)
+            watch_ok, gain_ok, gain_code = run_one_round(client, i, cfg)
         except Exception as e:
             print(f"  本轮异常:{e}")
             watch_fail += 1
@@ -752,8 +816,15 @@ def main():
             claim_success += 1
         else:
             claim_fail += 1
-            # 领取失败 (如已达每日上限) 时提前停止,避免继续消耗广告次数
+            # 领取失败时提前停止,避免继续消耗广告次数。
+            # 实测 code=2002「休息一下，请稍后再试」= 当日 b_tag 已用尽
+            # (服务端风控, 同一 b_tag 每天约可成功领取 1 次), 并非当日广告
+            # 次数上限; 补充 CHECKTOKEN_B_TAG_POOL 可增加当日领取次数。
             print("  权益领取失败,提前停止本轮执行。")
+            if gain_code == 2002:
+                print("  诊断: 2002「休息一下」通常表示当日 b_tag 已用尽。"
+                      "每个 b_tag 每天约可领取 1 次权益, 可在 user.json 的 "
+                      "CHECKTOKEN_B_TAG_POOL 中补充更多 b_tag 增加当日领取次数。")
             break
 
         if i < rounds:
@@ -776,8 +847,8 @@ def main():
 
     print("\n执行完成!")
 
-    # 退出码 2: 当天次数已用完 (广告次数不足或领取被服务端拒绝),
-    # 供调度脚本 (run_ads.py) 识别并停止后续轮次
+    # 退出码 2: 当天无法继续领取权益 (b_tag 池用尽被服务端 2002 拒绝,
+    # 或服务端判定当日领取达到上限), 供调度脚本 (run_ads.py) 识别并停止
     if claim_fail > 0:
         sys.exit(2)
 

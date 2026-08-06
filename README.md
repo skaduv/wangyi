@@ -122,7 +122,7 @@ pip install requests pycryptodome
 | `DEVICE_ID` | 设备唯一标识 (32位hex) |
 | `USER_ID` | 用户ID,用于广告请求 ID |
 | `CHECKTOKEN_DEVICE_D` | checkToken 设备绑定值 `d` |
-| `CHECKTOKEN_B_TAG_POOL` | checkToken 会话标识 `b` 池 (非空数组) |
+| `CHECKTOKEN_B_TAG_POOL` | checkToken 会话标识 `b` 池 (每个 b_tag 每天约可成功领取 1 次,建议 5~10 个) |
 
 **可选字段** (缺失时请求中自动省略,可能影响广告匹配精度):
 `IDFV`、`OPENUDID`、`IYUN_ID`、`LAST_IYUN_ID`、`IYUN_VERSION`、
@@ -147,6 +147,12 @@ import sys; print(decode_check_token(sys.argv[1]))" 你的token
 
 4. 将 JSON 中的 `d` 填入 `CHECKTOKEN_DEVICE_D`,各次会话的 `b` 填入
    `CHECKTOKEN_B_TAG_POOL` 数组
+
+> **b_tag 数量 ≈ 每日可领取次数**: 实测服务端对同一 `b_tag` 每天约只放行
+> 1 次成功领取,复用后 `rights/gain` 返回 code=2002「休息一下，请稍后再试」。
+> 脚本把轮换索引持久化在 `b_tag_state.json`,每轮使用池中不同的 `b_tag`
+> (跨进程/GitHub Actions 多轮运行均生效),池子越大当日可领取次数越多。
+> 在 App 中每重新打开一次广告领取流程并抓包,即可取得一个新的 `b_tag`。
 
 ### 获取 MUSIC_U 和 DEVICE_ID
 
@@ -174,7 +180,11 @@ python netease_free_listen.py --rounds 5 --watch-time 16 --delay 10
 ### 权益规则 (与 App 一致)
 
 - **每支广告观看完成后立即领取 1 次权益** — 与 App 行为一致,拼图/免费听进度实时到账
-- **领取失败即停止** — 每日领取上限由服务端判定 (gainFlag),失败后提前停止并以退出码 2 结束
+- **领取失败即停止** — 领取被服务端拒绝时提前停止并以退出码 2 结束
+- **code=2002「休息一下，请稍后再试」= 该 b_tag 当日已用过** (服务端风控) —
+  换用池中下一个 b_tag 数分钟后即可正常领取,并非「当日广告次数用完」;
+  池中 b_tag 全部被拒即当日 b_tag 用尽,补充 `CHECKTOKEN_B_TAG_POOL`
+  (见上文「获取 checkToken 参数」) 即可继续。
 
 ### 运行示例
 
@@ -271,14 +281,17 @@ cron 触发 (UTC 00:00/01:00/02:00 = 北京 08:00/09:00/10:00)
 - 每次运行约 60-120 分钟 (含随机间隔),不会超出额度
 - `concurrency` 设置确保同一时间只有一个实例运行
 - cron 触发在实际执行时可能有数分钟延迟 (GitHub 调度机制)
+- `b_tag_state.json` 由 workflow 的 actions/cache 缓存,跨当天多次 cron 运行
+  共享轮换索引,保证每次运行使用不同的 b_tag (脚本按文件内日期自动跨天重置)
 
 ## 文件结构
 
 ```
 netease-free-listen/
-├── .gitignore                   # 排除 user.json 等敏感文件
+├── .gitignore                   # 排除 user.json / b_tag_state.json 等敏感文件
 ├── netease_free_listen.py       # 主程序 (单文件,含 checkToken 生成算法)
 ├── user.json                    # 用户配置 (MUSIC_U / DEVICE_ID / checkToken 参数)
+├── b_tag_state.json             # b_tag 轮换状态 (按天记录,自动生成)
 └── README.md                    # 本文档
 ```
 

@@ -26,6 +26,17 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # b_tag_state.json 记录当日已用 b_tag 的轮换索引 (每个 b_tag 每天约可
+      # 成功领取 1 次, 必须跨 cron 运行轮换)。脚本按文件内日期自动跨天重置,
+      # 所以恢复到旧日期的状态也无害。
+      - name: 缓存 b_tag 轮换状态
+        uses: actions/cache@v4
+        with:
+          path: b_tag_state.json
+          key: free-listen-btag-${{ github.run_date }}
+          restore-keys: |
+            free-listen-btag-
+
       - name: 设置 Python
         uses: actions/setup-python@v5
         with:

@@ -11,7 +11,8 @@ GitHub Actions 执行脚本 - 随机间隔看广告
 
 退出码约定 (主脚本 netease_free_listen.py):
   - 0: 正常完成
-  - 2: 当天广告次数已用完 (领取被服务端拒绝), 停止后续轮次
+  - 2: 当天无法继续领取权益 (checkToken b_tag 池用尽被服务端 2002 拒绝,
+    或服务端判定当日领取达到上限), 停止后续轮次
 """
 
 import os
@@ -67,7 +68,7 @@ def main():
                 success += 1
                 log(f"第 {i} 轮 完成")
             elif result.returncode == 2:
-                log(f"第 {i} 轮 当天广告次数已用完, 停止")
+                log(f"第 {i} 轮 当日 b_tag 已用尽或服务端拒绝领取, 停止")
                 break
             else:
                 fail += 1
