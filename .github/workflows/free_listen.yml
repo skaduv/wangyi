@@ -26,16 +26,21 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # b_tag_state.json 记录当日已用 b_tag 的轮换索引 (每个 b_tag 每天约可
-      # 成功领取 1 次, 必须跨 cron 运行轮换)。脚本按文件内日期自动跨天重置,
-      # 所以恢复到旧日期的状态也无害。
+      # actions/cache 的键不可覆盖，因此每次运行使用唯一键保存最新索引，
+      # 后续运行通过同一上海日期的前缀恢复最近一次状态。
+      - name: 生成上海日期
+        id: cache-date
+        env:
+          TZ: 'Asia/Shanghai'
+        run: echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
+
       - name: 缓存 b_tag 轮换状态
         uses: actions/cache@v4
         with:
           path: b_tag_state.json
-          key: free-listen-btag-${{ github.run_date }}
+          key: free-listen-btag-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            free-listen-btag-
+            free-listen-btag-${{ steps.cache-date.outputs.date }}-
 
       - name: 设置 Python
         uses: actions/setup-python@v5

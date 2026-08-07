@@ -363,9 +363,10 @@ class NetEaseEapi:
             "data": {"entranceType": "FREE_LISTEN"},
         })
 
-    def get_ad(self) -> dict:
-        """请求激励广告。"""
+    def get_ad(self, ad_req_id: str = "") -> dict:
+        """请求激励广告，并允许调用方固定本轮请求 ID。"""
         c = self.cfg
+        ad_req_id = ad_req_id or self._make_ad_req_id()
         ad_ext = c._nonempty(
             ipv4="",
             fromRN="1",
@@ -386,7 +387,7 @@ class NetEaseEapi:
                 lastIyunVersion=c.LAST_IYUN_VERSION,
             ),
             lbs=c._nonempty(longitude=c.LONGITUDE, latitude=c.LATITUDE),
-            adReqId=self._make_ad_req_id(),
+            adReqId=ad_req_id,
             isNativeSampling=False,
             network=1,
             lastIyunVersion=c.LAST_IYUN_VERSION,
@@ -512,7 +513,9 @@ def _get_context_info_str(ad_info: dict) -> str:
     return str(ci_raw) if ci_raw else ""
 
 
-def build_ad_data_for_monitor(ad_info: dict, ad_req_id: str, cfg: Config) -> dict:
+def build_ad_data_for_monitor(
+        ad_info: dict, ad_req_id: str, cfg: Config,
+        exposure_time_ms: int = None) -> dict:
     """构造广告曝光和点击上报参数。"""
     ci = _get_context_info(ad_info)
     gri = _parse_json(ad_info.get("generalRightsInfo"))
@@ -534,7 +537,7 @@ def build_ad_data_for_monitor(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
     if ad_material.get("videoInfo"):
         videos.append(ad_material["videoInfo"])
 
-    now_ms = time.time() * 1000
+    now_ms = exposure_time_ms if exposure_time_ms is not None else int(time.time() * 1000)
 
     return {
         "universalLinkType": 0,
@@ -581,7 +584,7 @@ def build_ad_data_for_monitor(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
         "button": "learnmore",
         "clientTime": now_ms,
         "resourceId": "-1",
-        "impressid": f"{ad_req_id}_{int(time.time())}_12",
+        "impressid": f"{ad_req_id}_{int(now_ms // 1000)}_12",
         "winPrice": ad_info.get("winPrice", 0),
         "position": ad_info.get("position", 1),
         "freeListenRequest": ad_info.get("freeListenRequest", ""),
@@ -599,11 +602,20 @@ def build_ad_data_for_monitor(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
     }
 
 
-def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dict:
-    """构造权益领取请求参数。"""
+def _extract_rights_metadata(ad_info: dict) -> tuple:
+    """规范化广告的通用权益与免费听权益元数据。"""
+    return (
+        _parse_json(ad_info.get("generalRightsInfo")),
+        ad_info.get("listeningRightsInfo") or {},
+    )
+
+
+def build_rights_claim_params(
+        ad_info: dict, ad_req_id: str, cfg: Config,
+        exposure_time_ms: int = None, click_time_ms: int = None) -> dict:
+    """构造权益领取请求参数，复用本轮真实曝光和点击时间。"""
     ci = _get_context_info(ad_info)
-    gri = _parse_json(ad_info.get("generalRightsInfo"))
-    lri = ad_info.get("listeningRightsInfo") or {}
+    gri, lri = _extract_rights_metadata(ad_info)
     context_info_str = _get_context_info_str(ad_info)
 
     app_info = json.dumps({
@@ -611,7 +623,10 @@ def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
         "productName": ad_info.get("text", ""),
     })
 
-    now_ms = int(time.time() * 1000)
+    if exposure_time_ms is None or click_time_ms is None:
+        now_ms = int(time.time() * 1000)
+        exposure_time_ms = now_ms if exposure_time_ms is None else exposure_time_ms
+        click_time_ms = now_ms if click_time_ms is None else click_time_ms
 
     return {
         "rightsGainMethod": gri.get("rightsGainMethod", lri.get("rightsGainMethod", 4)),
@@ -636,24 +651,87 @@ def build_rights_claim_params(ad_info: dict, ad_req_id: str, cfg: Config) -> dic
         "sniffTime": 0,
         "generalRightsInfo": ad_info.get("generalRightsInfo", ""),
         "nextRightsGainDuration": lri.get("nextRightsGainDuration", 0),
-        "exposureTime": now_ms,
+        "exposureTime": exposure_time_ms,
         "extraRightsType": lri.get("extraRightsType", 0),
         "qualified": False,
         "delayPopTime": gri.get("delayPopTime", 10),
         "rightType": gri.get("rightType", 10),
-        "clickTime": now_ms,
+        "clickTime": click_time_ms,
         "adPosition": cfg.AD_POSITION,
         "rightsGainDuration": 0,
     }
 
 
+def _business_success(resp: dict, operation: str) -> bool:
+    """校验接口业务响应，失败时输出不含敏感数据的摘要。"""
+    if not isinstance(resp, dict):
+        print(f"  {operation}失败: 响应格式无效")
+        return False
+    if resp.get("code") != 200:
+        print(f"  {operation}失败: code={resp.get('code')}, "
+              f"message={resp.get('message', '未知错误')}")
+        return False
+    return True
+
+
+def _nonnegative_seconds(value):
+    """将广告返回的秒数安全转换为非负浮点数。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0 or seconds == float("inf") or seconds != seconds:
+        return None
+    return seconds
+
+
+def _wait_seconds(seconds: float):
+    """基于单调时钟等待，避免系统时间调整缩短停留时间。"""
+    deadline = time.monotonic() + seconds
+    remaining = seconds
+    while remaining > 0:
+        time.sleep(remaining)
+        remaining = deadline - time.monotonic()
+
+
+def _print_stage_state(stage: dict, prefix: str = "当前"):
+    """输出阶段响应中的进度和阶段摘要。"""
+    data = stage.get("data", {}) if isinstance(stage, dict) else {}
+    data = data if isinstance(data, dict) else {}
+    print(f"  {prefix}进度:{data.get('currentAmount', '未知')}/"
+          f"{data.get('maximumAmount', '未知')}")
+    print(f"  {prefix}阶段:{data.get('currentIndex', '未知')}/"
+          f"{data.get('totalStage', '未知')}")
+
+
+def _refresh_rights_state(client: NetEaseEapi):
+    """领取成功后刷新阶段和免费听数据；刷新失败不改变领取结果。"""
+    print("  刷新权益状态...")
+    time.sleep(1)
+
+    try:
+        stage = client.get_stage_info()
+        if _business_success(stage, "阶段刷新"):
+            _print_stage_state(stage)
+    except Exception as e:
+        print(f"  [警告] 阶段刷新异常:{e}")
+
+    try:
+        free_listen = client.get_free_listen_data()
+        if _business_success(free_listen, "免费听数据刷新"):
+            data = free_listen.get("data")
+            keys = sorted(data.keys()) if isinstance(data, dict) else []
+            print(f"  免费听数据刷新成功, data 字段:{', '.join(keys) or '无'}")
+    except Exception as e:
+        print(f"  [警告] 免费听数据刷新异常:{e}")
+
+
 def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
     """执行一轮「观看广告 + 领取权益」流程。
 
-    与 App 行为一致: 每支广告观看完成后立即领取 1 次权益 (拼图/免费听时长)。
-    领取必须复用刚观看的这支广告的 contextInfo/requestId —— 服务端按该广告的
-    曝光/点击记录判定领取有效性, 重新请求的新广告 (无曝光记录) 无法领取。
-
+    领取复用同一广告会话的 requestId、contextInfo 和真实曝光/点击时间。
     返回: (观看是否成功, 领取是否成功, 领取响应 code 或 None)。
     """
     print(f"\n{'=' * 60}")
@@ -661,69 +739,100 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
     print(f"{'=' * 60}")
 
     print("[1/4] 请求广告...")
-    ad_resp = client.get_ad()
+    sent_ad_req_id = client._make_ad_req_id()
+    ad_resp = client.get_ad(ad_req_id=sent_ad_req_id)
 
-    if ad_resp.get("code") != 200:
-        print(f"  请求广告失败:{ad_resp.get('message', '未知错误')}")
+    if not _business_success(ad_resp, "请求广告"):
         return False, False, None
 
     ads = ad_resp.get("ads", {})
     ad_key = f"{cfg.AD_POSITION}_0"
-
     if ad_key not in ads:
         print(f"  没有可用广告:{ad_resp.get('message', '无')}")
         return False, False, None
 
     ad_info = ads[ad_key]
     ci = _get_context_info(ad_info)
-    gri = _parse_json(ad_info.get("generalRightsInfo"))
-    lri = ad_info.get("listeningRightsInfo") or {}
+    gri, lri = _extract_rights_metadata(ad_info)
 
     print(f"  广告:{ad_info.get('text', '无标题')[:60]}")
     print(f"  ad_id: {ad_info.get('ad_id')}, req_id: {ci.get('req_id', 'N/A')}")
-    print(f"  领取方式:{gri.get('rightsGainMethod', '未知')},"
-          f"停留:{gri.get('clickStayTime', '未知')} 秒,"
-          f"有效间隔:{gri.get('validVideoInterval', '未知')} 秒")
 
-    # 轮换 checkToken (算法生成, 每轮用池中不同的 b_tag)
+    response_request_id = ad_info.get("requestId", "")
+    ad_req_id = response_request_id or sent_ad_req_id
+    if response_request_id:
+        print("  requestId: 使用广告响应值")
+        if response_request_id != sent_ad_req_id:
+            print("  [提示] 响应 requestId 与发送的 adReqId 不同，后续沿用响应值")
+    else:
+        print("  requestId: 响应缺失，沿用本轮发送的 adReqId")
+
+    rights_gain_method = gri.get(
+        "rightsGainMethod", lri.get("rightsGainMethod", 4))
+    click_stay_raw = gri.get(
+        "clickStayTime", lri.get("clickStayTime"))
+    click_stay_time = _nonnegative_seconds(click_stay_raw)
+    click_stay_extend = gri.get(
+        "clickStayTimeExtend", lri.get("clickStayTimeExtend"))
+    valid_video_interval = gri.get(
+        "validVideoInterval", lri.get("validVideoInterval"))
+    print(f"  领取方式:{rights_gain_method},停留:{click_stay_raw if click_stay_raw is not None else '未知'} 秒,"
+          f"扩展:{click_stay_extend if click_stay_extend is not None else '未知'} 秒,"
+          f"有效间隔:{valid_video_interval if valid_video_interval is not None else '未知'} 秒")
+
     check_token = client._get_next_check_token()
     tag_index = current_b_tag_index() % len(Config.CHECKTOKEN_B_TAG_POOL)
     tag_count = len(Config.CHECKTOKEN_B_TAG_POOL)
-    print(f"  checkToken: {check_token[:40]}... (长度: {len(check_token)}, "
+    print(f"  checkToken: 已生成 (长度: {len(check_token)}, "
           f"b_tag[{tag_index}/{tag_count}])")
 
-    ad_req_id = ad_info.get("requestId", "")
-    if not ad_req_id:
-        ad_req_id = client._make_ad_req_id()
-
     print("[2/4] 上报广告曝光...")
-    ad_data = build_ad_data_for_monitor(ad_info, ad_req_id, cfg)
+    exposure_time_ms = int(time.time() * 1000)
+    ad_data = build_ad_data_for_monitor(
+        ad_info, ad_req_id, cfg, exposure_time_ms=exposure_time_ms)
     impress_resp = client.report_impress(ad_data)
-    print(f"  曝光上报结果:code={impress_resp.get('code')}")
+    if not _business_success(impress_resp, "曝光上报"):
+        return False, False, None
+    print("  曝光上报结果:code=200")
 
     print(f"  模拟观看 {cfg.WATCH_DELAY} 秒...")
-    time.sleep(cfg.WATCH_DELAY)
+    _wait_seconds(cfg.WATCH_DELAY)
 
     print("[3/4] 上报广告点击...")
-    ad_data["clickTime"] = int(time.time() * 1000)
+    click_time_ms = int(time.time() * 1000)
+    ad_data["clickTime"] = click_time_ms
     click_resp = client.report_click(ad_data)
-    print(f"  点击上报结果:code={click_resp.get('code')}")
+    if not _business_success(click_resp, "点击上报"):
+        return False, False, None
+    print("  点击上报结果:code=200")
 
-    # 广告观看完成, 立即领取 (复用同一广告的请求参数)
-    time.sleep(cfg.CLAIM_DELAY)
+    if click_stay_time is None:
+        claim_delay = float(cfg.CLAIM_DELAY)
+        print(f"  [警告] clickStayTime 无效，使用兼容下限 {claim_delay:g} 秒")
+    else:
+        claim_delay = max(float(cfg.CLAIM_DELAY), click_stay_time)
+    print(f"  点击后停留 {claim_delay:g} 秒 "
+          f"(广告要求:{click_stay_time if click_stay_time is not None else '未知'}, "
+          f"兼容下限:{cfg.CLAIM_DELAY})...")
+    _wait_seconds(claim_delay)
 
     print("[4/4] 领取免费听权益...")
-    req_param = build_rights_claim_params(ad_info, ad_req_id, cfg)
+    req_param = build_rights_claim_params(
+        ad_info, ad_req_id, cfg,
+        exposure_time_ms=exposure_time_ms,
+        click_time_ms=click_time_ms,
+    )
     gain_resp = client.claim_rights(req_param, check_token=check_token)
 
+    gain_resp = gain_resp if isinstance(gain_resp, dict) else {}
+    data = gain_resp.get("data", {})
+    data = data if isinstance(data, dict) else {}
     code = gain_resp.get("code")
     msg = gain_resp.get("message", "")
-    data = gain_resp.get("data", {})
-
-    gain_flag = data.get("gainFlag", False) if isinstance(data, dict) else False
-    show_content = data.get("showContent", "") if isinstance(data, dict) else ""
-    rights_duration = data.get("gainRightsDuration") if isinstance(data, dict) else None
-    rights_unit = data.get("rightsDurationUnit") if isinstance(data, dict) else None
+    gain_flag = data.get("gainFlag", False)
+    show_content = data.get("showContent", "")
+    rights_duration = data.get("gainRightsDuration")
+    rights_unit = data.get("rightsDurationUnit")
 
     print(f"  领取结果:code={code},成功={gain_flag}")
     if msg:
@@ -732,11 +841,14 @@ def run_one_round(client: NetEaseEapi, round_num: int, cfg: Config) -> tuple:
         print(f"  内容:{show_content}")
     if rights_duration:
         print(f"  获得时长:{rights_duration} {rights_unit or ''}")
+    if code == 200 and not gain_flag:
+        print("  [失败] 接口请求成功，但服务端未发放权益")
 
-    # 服务端已对该 b_tag 作出判定 (200 成功 / 2002 风控拒绝) —— 该 b_tag
-    # 当日不可复用, 推进轮换索引, 供下一轮/下一次运行使用
     if code in (200, 2002):
         advance_b_tag_index()
+
+    if gain_flag:
+        _refresh_rights_state(client)
 
     return True, gain_flag, code
 
@@ -782,11 +894,7 @@ def main():
     print("\n[初始化] 查询免费听进度...")
     try:
         stage = client.get_stage_info()
-        sd = stage.get("data", {})
-        current_amount = sd.get('currentAmount', 0)
-        maximum_amount = sd.get('maximumAmount', 0)
-        print(f"  当前进度:{current_amount}/{maximum_amount}")
-        print(f"  当前阶段:{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
+        _print_stage_state(stage)
     except Exception as e:
         print(f"  查询进度异常:{e}")
 
@@ -839,18 +947,19 @@ def main():
 
     try:
         stage = client.get_stage_info()
-        sd = stage.get("data", {})
-        print(f"\n  最终进度:{sd.get('currentAmount', '未知')}/{sd.get('maximumAmount', '未知')}")
-        print(f"  最终阶段:{sd.get('currentIndex', '未知')}/{sd.get('totalStage', '未知')}")
+        print()
+        _print_stage_state(stage, prefix="最终")
     except Exception:
         pass
 
     print("\n执行完成!")
 
-    # 退出码 2: 当天无法继续领取权益 (b_tag 池用尽被服务端 2002 拒绝,
-    # 或服务端判定当日领取达到上限), 供调度脚本 (run_ads.py) 识别并停止
+    # 退出码 2 表示服务端未发放权益，供调度器停止后续轮次；
+    # 退出码 1 表示所有轮次均未走到有效领取，避免被调度器误记为完成。
     if claim_fail > 0:
         sys.exit(2)
+    if watch_fail > 0 and claim_success == 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

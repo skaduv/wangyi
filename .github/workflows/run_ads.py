@@ -68,7 +68,7 @@ def main():
                 success += 1
                 log(f"第 {i} 轮 完成")
             elif result.returncode == 2:
-                log(f"第 {i} 轮 当日 b_tag 已用尽或服务端拒绝领取, 停止")
+                log(f"第 {i} 轮 服务端拒绝或未发放权益, 停止后续轮次")
                 break
             else:
                 fail += 1
